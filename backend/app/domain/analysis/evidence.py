@@ -1,8 +1,15 @@
 from __future__ import annotations
 
+from copy import deepcopy
 from dataclasses import dataclass
 from enum import StrEnum
-from typing import Any
+from types import MappingProxyType
+from typing import Mapping
+
+
+JsonValue = (
+    str | int | float | bool | None | list["JsonValue"] | dict[str, "JsonValue"]
+)
 
 
 class EvidenceSourceType(StrEnum):
@@ -20,7 +27,7 @@ class EvidenceUnit:
     source_ref: str
     category: str
     content: str
-    structured_data: dict[str, Any]
+    structured_data: Mapping[str, JsonValue]
     confidence_score: float
 
     def __post_init__(self) -> None:
@@ -30,3 +37,9 @@ class EvidenceUnit:
             raise ValueError("confidence_score must be between 0 and 1")
         if not self.content.strip():
             raise ValueError("content must not be empty")
+
+        object.__setattr__(
+            self,
+            "structured_data",
+            MappingProxyType(deepcopy(dict(self.structured_data))),
+        )
