@@ -572,7 +572,106 @@ Pipeline:
 
 生产启动时必须做配置校验。如果关键配置缺失或存在不安全默认值，服务应该启动失败，而不是进入半可用状态。
 
-## 13. 错误处理与可观测性
+## 13. 本地测试与 VSCode 单步调试
+
+本地开发必须同时支持两种模式：
+
+```text
+1. Docker Compose 完整本地环境
+   - api
+   - worker
+   - mysql
+   - redis
+   - minio
+
+2. VSCode 单步调试环境
+   - mysql / redis / minio 仍由 Docker Compose 启动
+   - api 可以在本机 Python 进程中启动，方便断点调试
+   - worker 可以单独在本机 Python 进程中启动，方便调试耗时 Pipeline
+```
+
+本地调试目标：
+
+- 可以在 VSCode 中给 `api/routes`、`application`、`domain`、`infrastructure` 任意层打断点。
+- 可以按步调试 `POST /api/analysis-tasks` 创建任务流程。
+- 可以按步调试 Worker 执行 `AnalysisOrchestrator` 和每个 Pipeline step。
+- 本地 `.env` 可以复用 Docker Compose 和 VSCode debug 配置。
+- 本地调试不依赖真实腾讯云 MySQL/Redis/COS，使用 Docker MySQL/Redis/MinIO 即可。
+
+推荐调试方式：
+
+```text
+日常端到端测试:
+  docker compose up --build
+
+API 单步调试:
+  docker compose up -d mysql redis minio
+  VSCode 启动 FastAPI debug 配置
+
+Worker 单步调试:
+  docker compose up -d mysql redis minio
+  VSCode 启动 Worker debug 配置
+```
+
+如果需要在 Docker 容器内打断点，可增加 debug compose：
+
+```text
+docker-compose.debug.yml
+  - api 使用 debugpy 启动
+  - 暴露 5678 端口
+  - VSCode attach 到 localhost:5678
+```
+
+默认优先支持“本机 Python 进程调试 API/Worker”，因为断点、变量查看和文件映射最直接；容器内 debugpy 作为补充方案。
+
+## 14. 腾讯云部署约束
+
+生产环境部署目标为腾讯云。部署方案应方便从本地 Compose 迁移到腾讯云云资源。
+
+推荐生产组件：
+
+```text
+API / Worker:
+  Docker 镜像部署到 CVM、轻量应用服务器、TKE 或腾讯云容器服务
+
+Database:
+  腾讯云 MySQL
+
+Queue:
+  腾讯云 Redis
+
+Storage:
+  腾讯云 COS
+
+入口:
+  HTTPS 域名 + Nginx 或腾讯云负载均衡
+```
+
+生产部署要求：
+
+- API 和 Worker 使用同一个镜像，不同启动命令。
+- MySQL、Redis、COS 使用腾讯云托管或云产品，不在生产 Docker Compose 中自建有状态服务。
+- `.env` 只用于本地；生产使用云平台环境变量或密钥管理。
+- `APP_ENV=prod` 时必须关闭测试登录和测试 openid。
+- `APP_ENV=prod` 时必须拒绝默认 `JWT_SECRET`、SQLite、本地 Redis、缺失 COS/微信/模型配置。
+- 数据库 schema 通过 Alembic migration 管理，生产应用启动不自动建表。
+- 腾讯云部署文档必须说明域名、HTTPS、备案、小程序合法域名、COS bucket CORS、MySQL/Redis 白名单。
+
+本地与线上配置应保持同名环境变量，差异只体现在值：
+
+```text
+本地:
+  DATABASE_URL=mysql+pymysql://pulselink:pulselink@mysql:3306/pulselink
+  REDIS_URL=redis://redis:6379/0
+  COS_ENDPOINT=http://minio:9000
+
+生产:
+  DATABASE_URL=mysql+pymysql://<user>:<password>@<tencent-mysql-host>:3306/pulselink
+  REDIS_URL=redis://:<password>@<tencent-redis-host>:6379/0
+  COS_ENDPOINT=https://<bucket>.cos.<region>.myqcloud.com
+```
+
+## 15. 错误处理与可观测性
 
 用户可见错误：
 
@@ -613,7 +712,7 @@ task_failed
 
 内部日志可以包含详细堆栈。用户响应不能暴露堆栈信息。
 
-## 14. 测试与验收
+## 16. 测试与验收
 
 测试分层：
 
@@ -664,8 +763,11 @@ task_failed
 - Judgment cards 引用 evidence unit IDs。
 - 报告包含材料完整度、项目潜力评分、维度评分、证据页、补充建议和尽调建议。
 - 低置信度部分有明确标记。
+- 本地可以通过 Docker Compose 完整跑通 API、Worker、MySQL、Redis、MinIO。
+- 本地可以通过 VSCode 对 API 和 Worker 进行单步调试。
+- 生产部署配置可以直接映射到腾讯云 MySQL、Redis、COS 和容器运行环境。
 
-## 15. 重构边界
+## 17. 重构边界
 
 这是一次大重构。实现时不应继续在当前 MVP 形态上堆功能。
 
