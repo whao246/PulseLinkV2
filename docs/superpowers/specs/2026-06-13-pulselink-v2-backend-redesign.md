@@ -1,46 +1,46 @@
-# PulseLinkV2 Backend Redesign Spec
+# PulseLinkV2 后端重构设计 Spec
 
-## 1. Purpose
+## 1. 目标
 
-PulseLinkV2 will be redesigned around a maintainable backend architecture and a stronger PDF/model analysis pipeline. The existing architecture document is treated as business context and requirement reference. Existing code is not a structural constraint.
+PulseLinkV2 将围绕“可维护的后端架构”和“更扎实的 PDF/大模型分析 Pipeline”重新设计。现有架构文档只作为业务背景和需求参考，现有代码不作为目录结构、类设计或模块边界的约束。
 
-The redesign focuses on two priorities:
+本次重构聚焦两个优先级：
 
-- Rebuild the backend into clear API, application, domain, infrastructure, and worker layers.
-- Rebuild the PDF and large-model analysis flow around traceable evidence, high-quality parsing, idempotent tasks, and explainable scoring.
+- 将后端重建为清晰的 API、application、domain、infrastructure、worker 分层结构。
+- 将 PDF 和大模型分析链路重建为可追溯证据、高质量解析、任务幂等和可解释评分的核心 Pipeline。
 
-## 2. Non-Goals
+## 2. 非目标
 
-This spec does not cover:
+本 spec 不覆盖：
 
-- Rebuilding the mini program UI.
-- Admin dashboards.
-- Investor matching.
-- Payment.
-- Lead unlock flows.
-- Multi-user collaboration.
-- Human review backend.
+- 小程序 UI 重做。
+- 后台管理系统。
+- 投资机构匹配。
+- 支付。
+- 留资解锁。
+- 多人协作。
+- 人工复核后台。
 
-The data model should still leave room for future human review through evidence, judgment, and task-event traceability.
+但数据模型需要为未来人工复核预留基础：证据、判断卡和任务事件都必须可追溯。
 
-## 3. Recommended Architecture
+## 3. 推荐架构
 
-The backend should use a layered architecture:
+后端采用分层架构：
 
 ```text
-API / Worker entrypoints
+API / Worker 入口
   -> application services
   -> domain modules
   -> infrastructure adapters
 ```
 
-API and Worker are separate processes, but they share the same application and domain logic.
+API 和 Worker 是两个独立进程，但共享同一套 application 和 domain 逻辑。
 
 ```text
-Mini Program / curl
+小程序 / curl
         |
         v
-API process
+API 进程
   - auth routes
   - file routes
   - task routes
@@ -73,7 +73,7 @@ Infrastructure
   - PDF tools
 ```
 
-Worker flow:
+Worker 流程：
 
 ```text
 Redis MQ
@@ -82,15 +82,15 @@ Redis MQ
   -> PDF Pipeline / Model Pipeline / Scoring / Report
 ```
 
-Core principles:
+核心原则：
 
-- API handles fast operations only: authentication, validation, task creation, status query, report query.
-- Worker handles slow operations: PDF parsing, rendering, visual understanding, LLM scoring, report assembly.
-- Application services orchestrate use cases and are shared by API and Worker.
-- Domain modules own business rules such as task state, scoring rubric, document quality, and evidence structure.
-- Infrastructure adapters own external dependencies such as MySQL, Redis, COS, MiniMax, and PDF command-line tools.
+- API 只处理快操作：认证、参数校验、任务创建、状态查询、报告查询。
+- Worker 处理慢操作：PDF 解析、页面渲染、视觉理解、LLM 评分、报告组装。
+- Application services 编排业务用例，并被 API 和 Worker 复用。
+- Domain modules 承载业务规则，例如任务状态机、评分规则、文档质量评估、证据结构。
+- Infrastructure adapters 封装外部依赖，例如 MySQL、Redis、COS、MiniMax 和 PDF 命令行工具。
 
-## 4. Target Directory Structure
+## 4. 目标目录结构
 
 ```text
 backend/app/
@@ -190,19 +190,19 @@ backend/app/
   tests/
 ```
 
-Dependency rules:
+依赖规则：
 
 ```text
 api -> application
 workers -> application
 application -> domain + repositories + infrastructure clients
-domain -> no FastAPI, SQLAlchemy, Redis, COS, or vendor SDK dependency
-infrastructure -> may depend on external SDKs
+domain -> 不依赖 FastAPI、SQLAlchemy、Redis、COS 或供应商 SDK
+infrastructure -> 可以依赖外部 SDK
 ```
 
-## 5. API Contract
+## 5. API 协议
 
-The core API surface should remain small and stable:
+核心 API 保持小而稳定：
 
 ```text
 POST /api/auth/wechat-login
@@ -215,7 +215,7 @@ GET  /api/reports
 GET  /api/health
 ```
 
-Task creation:
+创建任务：
 
 ```http
 POST /api/analysis-tasks
@@ -234,38 +234,38 @@ Content-Type: application/json
 }
 ```
 
-API behavior:
+API 行为：
 
-1. Validate the user.
-2. Verify that the file belongs to the user.
-3. Enforce idempotency with `user_id + idempotency_key`.
-4. Create `analysis_task` and initial `task_steps`.
-5. Publish `AnalyzeDocumentRequested` to MQ.
-6. Return `task_id` immediately.
+1. 校验用户身份。
+2. 校验文件属于当前用户。
+3. 使用 `user_id + idempotency_key` 做幂等控制。
+4. 创建 `analysis_task` 和初始 `task_steps`。
+5. 向 MQ 发布 `AnalyzeDocumentRequested` 消息。
+6. 立即返回 `task_id`，不等待 PDF 或大模型处理完成。
 
-## 6. MQ and Async Processing
+## 6. MQ 与异步处理
 
-The system uses MQ for asynchronous triggering and MySQL for authoritative task state.
+系统使用 MQ 做异步触发，使用 MySQL 作为任务状态的事实来源。
 
 ```text
-API creates task in MySQL
-  -> API publishes MQ message
-  -> Worker consumes MQ message
-  -> Worker loads task from MySQL
-  -> Worker executes pipeline
-  -> Worker writes progress/results to MySQL
-  -> API reads status/report from MySQL
+API 在 MySQL 创建任务
+  -> API 发布 MQ 消息
+  -> Worker 消费 MQ 消息
+  -> Worker 从 MySQL 加载任务
+  -> Worker 执行 Pipeline
+  -> Worker 将进度和结果写回 MySQL
+  -> API 从 MySQL 读取状态和报告
 ```
 
-Recommended V1 queue implementation:
+V1 推荐队列实现：
 
 ```text
 Redis + RQ
 ```
 
-Future queue options can include Celery, Dramatiq, or cloud MQ if task routing becomes more complex.
+如果后续任务路由、优先级、定时调度变复杂，可以再演进到 Celery、Dramatiq 或云消息队列。
 
-MQ message:
+MQ 消息：
 
 ```json
 {
@@ -279,11 +279,11 @@ MQ message:
 }
 ```
 
-MQ should not carry PDF content, model prompts, full options, or long-lived state. Worker must treat MySQL as the source of truth.
+MQ 不承载 PDF 内容、模型 prompt、完整 options 或长期状态。Worker 必须以 MySQL 中的任务状态为准。
 
-## 7. Task State Machine
+## 7. 任务状态机
 
-Task states:
+任务主状态：
 
 ```text
 queued
@@ -293,7 +293,7 @@ failed
 cancelled
 ```
 
-Step states:
+步骤状态：
 
 ```text
 pending
@@ -304,7 +304,7 @@ skipped
 retrying
 ```
 
-Pipeline steps:
+Pipeline 步骤：
 
 ```text
 load_document
@@ -317,64 +317,64 @@ score_and_judge
 assemble_report
 ```
 
-Worker idempotency rules:
+Worker 幂等规则：
 
-- If task is `completed`, skip the whole job.
-- If a step is `succeeded`, skip the step.
-- If a step is `running` and `locked_until` has not expired, do not take ownership.
-- If a step is `failed` and `attempt_count < max_attempts`, move to `retrying`.
-- Every step writes progress, events, and failure reason.
+- 如果任务已经是 `completed`，跳过整个 job。
+- 如果某个 step 已经是 `succeeded`，跳过该 step。
+- 如果某个 step 是 `running` 且 `locked_until` 未过期，不抢占执行权。
+- 如果某个 step 是 `failed` 且 `attempt_count < max_attempts`，进入 `retrying`。
+- 每个 step 都要写入进度、事件和失败原因。
 
-## 8. PDF and Model Pipeline
+## 8. PDF 与模型 Pipeline
 
-The analysis pipeline has 8 stages:
+分析 Pipeline 分为 8 个阶段：
 
 ```text
 1. load_document
-   - Download/read PDF from COS or local storage.
-   - Validate sha256, file size, and page count.
+   - 从 COS 或本地存储下载/读取 PDF。
+   - 校验 sha256、文件大小和页数。
 
 2. parse_text_layout
-   - Extract text per page.
-   - Preserve page number, block order, layout hints, headings, and paragraphs.
+   - 按页提取文本。
+   - 保留页码、块顺序、版面提示、标题和段落结构。
 
 3. detect_tables_and_figures
-   - Detect table, chart, image, and low-confidence pages.
-   - Produce table candidates and vision candidates.
+   - 检测表格、图表、图片页和低置信度页面。
+   - 生成 table candidates 和 vision candidates。
 
 4. render_candidate_pages
-   - Render only pages that need visual analysis.
-   - Save page-image artifacts.
+   - 只渲染需要视觉分析的页面。
+   - 保存页面图片 artifact。
 
 5. vision_understanding
-   - Call visual model for candidate pages.
-   - Extract chart meaning, table structure, key numbers, units, and page summary.
+   - 对候选页调用视觉模型。
+   - 提取图表含义、表格结构、关键数字、单位和页面摘要。
 
 6. build_evidence_units
-   - Normalize text blocks, tables, and vision outputs into evidence units.
-   - Every evidence unit must have page number, source type, source ref, and confidence.
+   - 将文本块、表格和视觉结果统一归一化为 evidence units。
+   - 每条 evidence unit 必须包含页码、来源类型、来源引用和置信度。
 
 7. score_and_judge
-   - Score all 8 dimensions.
-   - Produce facts, evidence references, deduction reasons, BP supplement suggestions, and investor due-diligence suggestions.
+   - 对 8 个维度评分。
+   - 输出事实、证据引用、扣分原因、BP 补充建议和投资方尽调建议。
 
 8. assemble_report
-   - Assemble final report JSON.
-   - Persist report and mark task completed.
+   - 组装最终报告 JSON。
+   - 持久化报告，并将任务标记为 completed。
 ```
 
-The central pipeline concept is `EvidenceUnit`. Scoring must consume evidence units instead of raw PDF text.
+Pipeline 的中心概念是 `EvidenceUnit`。评分模块必须消费 evidence units，不能直接消费 PDF 原始文本。
 
-Benefits:
+好处：
 
-- PDF parsing and scoring are decoupled.
-- Every score can be traced back to page-level evidence.
-- Human review and evidence highlighting can be added later.
-- Model replacement becomes easier because scoring consumes a stable evidence contract.
+- PDF 解析和评分解耦。
+- 每个分数都能追溯到页级证据。
+- 后续可以加入人工复核和证据高亮。
+- 更换模型时，只要 evidence contract 稳定，评分层不需要大改。
 
-## 9. Data Model
+## 9. 数据模型
 
-Main tables:
+主表：
 
 ```text
 users
@@ -395,7 +395,7 @@ score_results
 reports
 ```
 
-Important unique constraints:
+重要唯一约束：
 
 ```text
 files: unique(user_id, sha256)
@@ -409,7 +409,7 @@ score_results: unique(task_id)
 reports: unique(task_id)
 ```
 
-Key models:
+关键模型：
 
 ```text
 DocumentPage
@@ -442,9 +442,9 @@ JudgmentCard
   investor_due_diligence_suggestions_json
 ```
 
-## 10. Scoring and Report Rules
+## 10. 评分与报告规则
 
-The 8 scoring dimensions remain:
+8 个评分维度保持不变：
 
 ```text
 problem_need_strength: 10
@@ -457,27 +457,27 @@ competition_barriers: 15
 financing_logic_use_of_funds: 10
 ```
 
-Scoring requirements:
+评分要求：
 
-- Each dimension must cite evidence units.
-- Missing problem/pain description makes `problem_need_strength` fail its baseline.
-- Missing market-size data makes `market_attractiveness` fail its baseline.
-- Team facts must be parsed carefully because entity extraction errors directly affect scoring.
-- Material completeness must appear before project potential in the report.
-- Suggestions must be split into BP supplement suggestions and investor due-diligence suggestions.
+- 每个维度必须引用 evidence units。
+- 缺少问题/痛点描述时，`problem_need_strength` 不能达到及格基线。
+- 缺少市场规模数据时，`market_attractiveness` 不能达到及格基线。
+- 团队事实必须谨慎解析，因为实体抽取错误会直接影响评分。
+- 材料完整度必须在项目潜力之前呈现。
+- 建议必须拆成 BP 补充建议和投资方尽调建议两类。
 
-Report requirements:
+报告要求：
 
-- Include material completeness.
-- Include project potential score.
-- Include 8 dimension cards.
-- Include evidence pages.
-- Include confidence level.
-- Clearly mark low-confidence sections.
+- 包含材料完整度。
+- 包含项目潜力评分。
+- 包含 8 个维度卡片。
+- 包含证据页。
+- 包含置信度等级。
+- 对低置信度部分做明确标记。
 
-## 11. Model Integration
+## 11. 模型接入
 
-Use a model gateway abstraction:
+使用统一模型网关抽象：
 
 ```text
 ModelGateway
@@ -485,7 +485,7 @@ ModelGateway
   understand_image_json()
 ```
 
-Concrete adapters:
+具体 adapter：
 
 ```text
 MiniMaxClient
@@ -493,7 +493,7 @@ OpenAICompatibleClient
 LocalFallbackClient
 ```
 
-Local MiniMax configuration:
+本地 MiniMax 配置：
 
 ```text
 LLM_API_BASE=https://api.minimax.chat/v1
@@ -502,15 +502,15 @@ VISION_API_BASE=https://api.minimax.chat/v1
 VISION_MODEL=MiniMax-M3
 ```
 
-Model rules:
+模型规则：
 
-- Model output must be JSON.
-- JSON must pass schema validation before persistence.
-- Invalid JSON triggers retry or fallback.
-- All model calls must record artifact metadata.
-- API keys must come from `.env` locally and secret management in production.
+- 模型输出必须是 JSON。
+- JSON 必须通过 schema 校验后才能持久化。
+- 非法 JSON 触发重试或 fallback。
+- 所有模型调用都必须记录 artifact 元数据。
+- 本地 API key 来自 `.env`，生产 API key 来自密钥管理或云平台环境变量。
 
-Model error categories:
+模型错误分类：
 
 ```text
 timeout
@@ -520,7 +520,7 @@ provider_error
 low_confidence
 ```
 
-Artifact metadata:
+Artifact 元数据：
 
 ```text
 model_name
@@ -531,9 +531,9 @@ latency_ms
 error_code
 ```
 
-## 12. Configuration
+## 12. 配置
 
-Configuration groups:
+配置分组：
 
 ```text
 App:
@@ -570,11 +570,11 @@ Pipeline:
   ENABLE_VISION
 ```
 
-Production startup must fail fast if required settings are missing or unsafe.
+生产启动时必须做配置校验。如果关键配置缺失或存在不安全默认值，服务应该启动失败，而不是进入半可用状态。
 
-## 13. Error Handling and Observability
+## 13. 错误处理与可观测性
 
-User-facing errors:
+用户可见错误：
 
 ```text
 PDF_PARSE_FAILED
@@ -584,7 +584,7 @@ LLM_TIMEOUT
 REPORT_NOT_READY
 ```
 
-Log fields:
+日志字段：
 
 ```text
 request_id
@@ -598,7 +598,7 @@ model_name
 error_code
 ```
 
-Task events:
+任务事件：
 
 ```text
 task_created
@@ -611,11 +611,11 @@ task_completed
 task_failed
 ```
 
-Internal logs can include detailed stack traces. User responses must not expose stack traces.
+内部日志可以包含详细堆栈。用户响应不能暴露堆栈信息。
 
-## 14. Testing and Acceptance
+## 14. 测试与验收
 
-Testing layers:
+测试分层：
 
 ```text
 1. Unit tests
@@ -644,46 +644,46 @@ Testing layers:
    - two sample PDFs regression
 ```
 
-Sample PDF regression files:
+样例 PDF 回归文件：
 
 ```text
 多线程DSP智能终端芯片_202603_副本.pdf
 追光科技A+轮融资商业计划书260226_副本.pdf
 ```
 
-Acceptance criteria:
+验收标准：
 
-- API can create and query tasks.
-- API does not synchronously wait for PDF/model processing.
-- MQ triggers Worker.
-- Worker can resume or skip already completed work.
-- PDF page count is correct for both sample PDFs.
-- Text blocks and table structures are extracted.
-- Vision candidates cover table/chart/image/low-confidence pages.
-- Evidence units cover all 8 scoring dimensions where source material exists.
-- Judgment cards reference evidence unit IDs.
-- Reports include completeness, potential score, dimension scores, evidence pages, supplement suggestions, and due-diligence suggestions.
-- Low-confidence sections are visibly marked.
+- API 可以创建任务和查询任务。
+- API 不同步等待 PDF/模型处理完成。
+- MQ 可以触发 Worker。
+- Worker 可以恢复或跳过已经完成的工作。
+- 两份样例 PDF 的页数正确。
+- 文本 blocks 和表格结构可以被抽取。
+- Vision candidates 覆盖表格、图表、图片和低置信度页面。
+- 在源材料存在的前提下，evidence units 可以覆盖全部 8 个评分维度。
+- Judgment cards 引用 evidence unit IDs。
+- 报告包含材料完整度、项目潜力评分、维度评分、证据页、补充建议和尽调建议。
+- 低置信度部分有明确标记。
 
-## 15. Redesign Boundary
+## 15. 重构边界
 
-This is a large redesign. The implementation should not continue piling features into the current MVP shape.
+这是一次大重构。实现时不应继续在当前 MVP 形态上堆功能。
 
-Implementation guidance:
+实施指导：
 
-- Use current documentation as requirement source.
-- Use current code only as behavior reference.
-- Use existing API behavior and PDF regression outputs as acceptance references.
-- Rebuild target modules according to the new architecture.
-- Remove or archive old MVP code after the new flow passes acceptance.
+- 使用当前文档作为需求来源。
+- 使用当前代码作为行为参考，而不是结构约束。
+- 使用现有 API 行为和 PDF 回归输出作为验收参考。
+- 按新架构重建目标模块。
+- 新流程通过验收后，旧 MVP 代码可以删除或归档。
 
-Final target:
+最终目标：
 
 ```text
-clear API
-reliable async task execution
-high-quality PDF evidence
-controlled model calls
-explainable scoring report
-production-ready deployment foundation
+清晰 API
+可靠异步任务执行
+高质量 PDF evidence
+可控模型调用
+可解释评分报告
+生产可部署基础
 ```
