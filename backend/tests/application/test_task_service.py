@@ -577,11 +577,78 @@ def test_stale_publish_failure_does_not_release_newer_claim(db_session):
     db_session.add(task)
     db_session.commit()
 
-    repository.mark_queue_publish_pending(task.id, claim_token=claim_token)
+    assert (
+        repository.mark_queue_publish_pending(task.id, claim_token=claim_token) is False
+    )
 
     db_session.refresh(task)
     assert task.payload["queue_publish_status"] == "publishing"
     assert task.payload["queue_publish_token"] == "newer-token"
+
+
+def test_stale_publish_success_does_not_complete_newer_claim(db_session):
+    service = TaskService(db_session=db_session, queue_publisher=None)
+    task = service.create_task(
+        user_id="usr_1",
+        file_id="file_1",
+        idempotency_key="idem_stale_success",
+        options={},
+    )
+    repository = TaskRepository(db_session)
+
+    task.payload = {
+        "queue_publish_status": "publishing",
+        "queue_publish_claimed_at": datetime.now(timezone.utc).isoformat(),
+        "queue_publish_token": "new-token",
+    }
+    db_session.add(task)
+    db_session.commit()
+
+    assert repository.mark_queue_published(task.id, claim_token="old-token") is False
+
+    db_session.refresh(task)
+    assert task.payload["queue_publish_status"] == "publishing"
+    assert task.payload["queue_publish_token"] == "new-token"
+
+
+def test_publish_success_with_current_claim_marks_published(db_session):
+    service = TaskService(db_session=db_session, queue_publisher=None)
+    task = service.create_task(
+        user_id="usr_1",
+        file_id="file_1",
+        idempotency_key="idem_current_success",
+        options={},
+    )
+    repository = TaskRepository(db_session)
+    claim_token = repository.claim_queue_publish(task.id)
+
+    assert repository.mark_queue_published(task.id, claim_token=claim_token) is True
+
+    db_session.refresh(task)
+    assert task.payload["queue_publish_status"] == "published"
+    assert "queue_publish_claimed_at" not in task.payload
+    assert "queue_publish_token" not in task.payload
+
+
+def test_publish_failure_with_current_claim_returns_to_pending(db_session):
+    service = TaskService(db_session=db_session, queue_publisher=None)
+    task = service.create_task(
+        user_id="usr_1",
+        file_id="file_1",
+        idempotency_key="idem_current_failure",
+        options={},
+    )
+    repository = TaskRepository(db_session)
+    claim_token = repository.claim_queue_publish(task.id)
+
+    assert (
+        repository.mark_queue_publish_pending(task.id, claim_token=claim_token) is True
+    )
+
+    db_session.refresh(task)
+    assert task.payload["queue_publish_status"] == "pending"
+    assert "queue_publish_claimed_at" not in task.payload
+    assert "queue_publish_token" not in task.payload
 
 
 def test_task_service_list_steps_orders_unknown_steps_stably(db_session):

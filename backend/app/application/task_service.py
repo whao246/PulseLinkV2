@@ -74,7 +74,10 @@ class TaskService:
 
         # This claim prevents duplicate enqueue from concurrent API retries. The
         # worker should still handle task_id idempotently for end-to-end safety.
-        self.tasks.mark_queue_published(task_id)
+        self.tasks.mark_queue_published(
+            task_id,
+            claim_token=claim_token,
+        )
 
     def list_steps(self, task_id: str):
         return self.tasks.list_steps(task_id)

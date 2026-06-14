@@ -125,24 +125,7 @@ class TaskRepository:
             return value.replace(tzinfo=timezone.utc)
         return value.astimezone(timezone.utc)
 
-    def mark_queue_published(self, task_id: str) -> None:
-        task = (
-            self.db_session.query(AnalysisTask)
-            .filter(AnalysisTask.id == task_id)
-            .one_or_none()
-        )
-        if task is None:
-            return
-
-        payload = dict(task.payload or {})
-        payload["queue_publish_status"] = QUEUE_PUBLISH_PUBLISHED
-        payload.pop("queue_publish_claimed_at", None)
-        payload.pop("queue_publish_token", None)
-        task.payload = payload
-        self.db_session.add(task)
-        self.db_session.commit()
-
-    def mark_queue_publish_pending(self, task_id: str, *, claim_token: str) -> None:
+    def mark_queue_published(self, task_id: str, *, claim_token: str) -> bool:
         task = (
             self.db_session.query(AnalysisTask)
             .filter(AnalysisTask.id == task_id)
@@ -151,18 +134,42 @@ class TaskRepository:
         )
         if task is None:
             self.db_session.commit()
-            return
+            return False
 
         payload = dict(task.payload or {})
         if payload.get("queue_publish_token") != claim_token:
             self.db_session.commit()
-            return
+            return False
+        payload["queue_publish_status"] = QUEUE_PUBLISH_PUBLISHED
+        payload.pop("queue_publish_claimed_at", None)
+        payload.pop("queue_publish_token", None)
+        task.payload = payload
+        self.db_session.add(task)
+        self.db_session.commit()
+        return True
+
+    def mark_queue_publish_pending(self, task_id: str, *, claim_token: str) -> bool:
+        task = (
+            self.db_session.query(AnalysisTask)
+            .filter(AnalysisTask.id == task_id)
+            .with_for_update()
+            .one_or_none()
+        )
+        if task is None:
+            self.db_session.commit()
+            return False
+
+        payload = dict(task.payload or {})
+        if payload.get("queue_publish_token") != claim_token:
+            self.db_session.commit()
+            return False
         payload["queue_publish_status"] = QUEUE_PUBLISH_PENDING
         payload.pop("queue_publish_claimed_at", None)
         payload.pop("queue_publish_token", None)
         task.payload = payload
         self.db_session.add(task)
         self.db_session.commit()
+        return True
 
     def list_steps(self, task_id: str):
         steps = (
