@@ -5,6 +5,10 @@ from uuid import uuid4
 from app.domain.analysis.pipeline import PIPELINE_STEP_NAMES
 from app.infrastructure.db.models import AnalysisTask, TaskStep
 
+QUEUE_PUBLISH_PENDING = "pending"
+QUEUE_PUBLISH_PUBLISHING = "publishing"
+QUEUE_PUBLISH_PUBLISHED = "published"
+
 
 class TaskRepository:
     def __init__(self, db_session):
@@ -38,7 +42,7 @@ class TaskRepository:
             model_profile=model_profile,
             status=status,
             options={},
-            payload={},
+            payload={"queue_publish_status": QUEUE_PUBLISH_PENDING},
         )
         self.db_session.add(task)
         return task
@@ -54,6 +58,65 @@ class TaskRepository:
         )
         self.db_session.add(step)
         return step
+
+    def claim_queue_publish(self, task_id: str) -> bool:
+        task = (
+            self.db_session.query(AnalysisTask)
+            .filter(AnalysisTask.id == task_id)
+            .with_for_update()
+            .one_or_none()
+        )
+        if task is None:
+            return False
+
+        payload = task.payload or {}
+        status = payload.get("queue_publish_status")
+        if status in {QUEUE_PUBLISH_PUBLISHING, QUEUE_PUBLISH_PUBLISHED}:
+            return False
+        if payload.get("queue_published") is True:
+            return False
+
+        task.payload = {
+            **payload,
+            "queue_publish_status": QUEUE_PUBLISH_PUBLISHING,
+        }
+        self.db_session.add(task)
+        self.db_session.commit()
+        return True
+
+    def mark_queue_published(self, task_id: str) -> None:
+        task = (
+            self.db_session.query(AnalysisTask)
+            .filter(AnalysisTask.id == task_id)
+            .one_or_none()
+        )
+        if task is None:
+            return
+
+        payload = task.payload or {}
+        task.payload = {
+            **payload,
+            "queue_publish_status": QUEUE_PUBLISH_PUBLISHED,
+        }
+        self.db_session.add(task)
+        self.db_session.commit()
+
+    def mark_queue_publish_pending(self, task_id: str) -> None:
+        task = (
+            self.db_session.query(AnalysisTask)
+            .filter(AnalysisTask.id == task_id)
+            .one_or_none()
+        )
+        if task is None:
+            return
+
+        payload = task.payload or {}
+        task.payload = {
+            **payload,
+            "queue_publish_status": QUEUE_PUBLISH_PENDING,
+        }
+        self.db_session.add(task)
+        self.db_session.commit()
 
     def list_steps(self, task_id: str):
         steps = (

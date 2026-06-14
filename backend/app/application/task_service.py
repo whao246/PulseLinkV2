@@ -54,14 +54,22 @@ class TaskService:
         return task
 
     def _publish_if_needed(self, task):
-        payload = task.payload or {}
-        if payload.get("queue_published") is True:
+        if self.queue_publisher is None:
             return
-        if self.queue_publisher is not None:
-            self.queue_publisher.publish_analyze_document(task_id=task.id)
-            task.payload = {**payload, "queue_published": True}
-            self.db_session.add(task)
-            self.db_session.commit()
+
+        task_id = task.id
+        if not self.tasks.claim_queue_publish(task_id):
+            return
+
+        try:
+            self.queue_publisher.publish_analyze_document(task_id=task_id)
+        except Exception:
+            self.tasks.mark_queue_publish_pending(task_id)
+            raise
+
+        # This claim prevents duplicate enqueue from concurrent API retries. The
+        # worker should still handle task_id idempotently for end-to-end safety.
+        self.tasks.mark_queue_published(task_id)
 
     def list_steps(self, task_id: str):
         return self.tasks.list_steps(task_id)

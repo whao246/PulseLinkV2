@@ -82,7 +82,7 @@ def test_task_service_returns_same_task_for_same_idempotency_key(db_session):
     )
 
     assert first.id == second.id
-    assert second.payload.get("queue_published") is not True
+    assert second.payload["queue_publish_status"] == "pending"
 
 
 def test_task_service_initializes_pipeline_steps(db_session):
@@ -93,6 +93,7 @@ def test_task_service_initializes_pipeline_steps(db_session):
     )
     steps = service.list_steps(task.id)
 
+    assert task.status == "queued"
     assert [step.step_name for step in steps] == [
         "load_document",
         "parse_text_layout",
@@ -103,6 +104,7 @@ def test_task_service_initializes_pipeline_steps(db_session):
         "score_and_judge",
         "assemble_report",
     ]
+    assert [step.status for step in steps] == ["pending"] * 8
 
 
 def test_task_service_does_not_republish_for_same_idempotency_key(db_session):
@@ -129,6 +131,39 @@ def test_task_service_publishes_new_task_once(db_session):
     )
 
     assert queue_publisher.published_task_ids == [task.id]
+
+
+def test_task_service_uses_saved_task_id_after_publish_claim(db_session, monkeypatch):
+    queue_publisher = QueuePublisherSpy()
+    service = TaskService(db_session=db_session, queue_publisher=queue_publisher)
+    original_claim = service.tasks.claim_queue_publish
+
+    def claim_and_detach(task_id):
+        claimed = original_claim(task_id)
+        task = next(
+            model
+            for model in db_session.identity_map.values()
+            if isinstance(model, AnalysisTask)
+        )
+        db_session.expunge(task)
+        return claimed
+
+    monkeypatch.setattr(service.tasks, "claim_queue_publish", claim_and_detach)
+
+    service.create_task(
+        user_id="usr_1",
+        file_id="file_1",
+        idempotency_key="idem_saved_task_id",
+        options={},
+    )
+
+    task_id = (
+        db_session.query(AnalysisTask)
+        .filter_by(idempotency_key="idem_saved_task_id")
+        .one()
+        .id
+    )
+    assert queue_publisher.published_task_ids == [task_id]
 
 
 def test_task_service_persists_model_profile_option(db_session):
@@ -161,7 +196,7 @@ def test_task_service_retries_publish_for_existing_unpublished_task(db_session):
         .filter_by(user_id="usr_1", idempotency_key="idem_publish_retry")
         .one()
     )
-    assert task_after_failure.payload.get("queue_published") is not True
+    assert task_after_failure.payload["queue_publish_status"] == "pending"
 
     retried = service.create_task(
         user_id="usr_1",
@@ -175,7 +210,88 @@ def test_task_service_retries_publish_for_existing_unpublished_task(db_session):
     assert db_session.query(TaskStep).count() == 8
     assert queue_publisher.calls == 2
     assert queue_publisher.published_task_ids == [retried.id, retried.id]
-    assert retried.payload["queue_published"] is True
+    assert retried.payload["queue_publish_status"] == "published"
+
+
+def test_task_service_does_not_publish_when_existing_task_is_already_claimed(db_session):
+    existing_service = TaskService(db_session=db_session, queue_publisher=None)
+    existing = existing_service.create_task(
+        user_id="usr_1",
+        file_id="file_1",
+        idempotency_key="idem_publish_claimed",
+        options={},
+    )
+    existing.payload = {"queue_publish_status": "publishing"}
+    db_session.add(existing)
+    db_session.commit()
+
+    queue_publisher = QueuePublisherSpy()
+    service = TaskService(db_session=db_session, queue_publisher=queue_publisher)
+
+    retried = service.create_task(
+        user_id="usr_1",
+        file_id="file_1",
+        idempotency_key="idem_publish_claimed",
+        options={},
+    )
+
+    assert retried.id == existing.id
+    assert queue_publisher.published_task_ids == []
+    assert retried.payload["queue_publish_status"] == "publishing"
+
+
+def test_task_service_does_not_republish_when_existing_task_is_published(db_session):
+    existing_service = TaskService(db_session=db_session, queue_publisher=None)
+    existing = existing_service.create_task(
+        user_id="usr_1",
+        file_id="file_1",
+        idempotency_key="idem_publish_done",
+        options={},
+    )
+    existing.payload = {"queue_publish_status": "published"}
+    db_session.add(existing)
+    db_session.commit()
+
+    queue_publisher = QueuePublisherSpy()
+    service = TaskService(db_session=db_session, queue_publisher=queue_publisher)
+
+    retried = service.create_task(
+        user_id="usr_1",
+        file_id="file_1",
+        idempotency_key="idem_publish_done",
+        options={},
+    )
+
+    assert retried.id == existing.id
+    assert queue_publisher.published_task_ids == []
+    assert retried.payload["queue_publish_status"] == "published"
+
+
+def test_task_service_does_not_republish_legacy_published_task(db_session):
+    existing_service = TaskService(db_session=db_session, queue_publisher=None)
+    existing = existing_service.create_task(
+        user_id="usr_1",
+        file_id="file_1",
+        idempotency_key="idem_legacy_publish_done",
+        options={},
+    )
+    existing.payload = {"queue_published": True}
+    db_session.add(existing)
+    db_session.commit()
+
+    queue_publisher = QueuePublisherSpy()
+    service = TaskService(db_session=db_session, queue_publisher=queue_publisher)
+
+    retried = service.create_task(
+        user_id="usr_1",
+        file_id="file_1",
+        idempotency_key="idem_legacy_publish_done",
+        options={},
+    )
+
+    assert retried.id == existing.id
+    assert queue_publisher.published_task_ids == []
+    assert retried.payload == {"queue_published": True}
 
 
 def test_task_service_recovers_from_idempotency_integrity_error(db_session, monkeypatch):
@@ -186,6 +302,7 @@ def test_task_service_recovers_from_idempotency_integrity_error(db_session, monk
         idempotency_key="idem_integrity",
         options={},
     )
+    existing_id = existing.id
     db_session.expunge_all()
 
     queue_publisher = QueuePublisherSpy()
@@ -220,7 +337,9 @@ def test_task_service_recovers_from_idempotency_integrity_error(db_session, monk
         options={},
     )
 
-    assert recovered.id == existing.id
+    assert recovered.id == existing_id
+    assert db_session.query(AnalysisTask).count() == 1
+    assert db_session.query(TaskStep).count() == 8
     assert queue_publisher.published_task_ids == []
 
 
