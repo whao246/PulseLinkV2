@@ -62,4 +62,11 @@ class TaskRepository:
             .all()
         )
         order = {step_name: index for index, step_name in enumerate(PIPELINE_STEP_NAMES)}
-        return sorted(steps, key=lambda step: order.get(step.step_name, len(order)))
+        return sorted(
+            steps,
+            key=lambda step: (
+                order.get(step.step_name, len(order)),
+                step.step_name,
+                step.id,
+            ),
+        )

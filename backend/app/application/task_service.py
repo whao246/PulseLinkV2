@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from sqlalchemy.exc import IntegrityError
+
 from app.domain.analysis.pipeline import PIPELINE_STEP_NAMES
 from app.domain.tasks.state_machine import StepStatus, TaskStatus
 from app.infrastructure.db.repositories.tasks import TaskRepository
@@ -21,6 +23,7 @@ class TaskService:
     ):
         existing = self.tasks.get_by_idempotency_key(user_id, idempotency_key)
         if existing is not None:
+            self._publish_if_needed(existing)
             return existing
 
         options = options or {}
@@ -38,10 +41,27 @@ class TaskService:
                 status=StepStatus.PENDING.value,
             )
 
-        self.db_session.commit()
+        try:
+            self.db_session.commit()
+        except IntegrityError:
+            self.db_session.rollback()
+            existing = self.tasks.get_by_idempotency_key(user_id, idempotency_key)
+            if existing is not None:
+                return existing
+            raise
+
+        self._publish_if_needed(task)
+        return task
+
+    def _publish_if_needed(self, task):
+        payload = task.payload or {}
+        if payload.get("queue_published") is True:
+            return
         if self.queue_publisher is not None:
             self.queue_publisher.publish_analyze_document(task_id=task.id)
-        return task
+            task.payload = {**payload, "queue_published": True}
+            self.db_session.add(task)
+            self.db_session.commit()
 
     def list_steps(self, task_id: str):
         return self.tasks.list_steps(task_id)
