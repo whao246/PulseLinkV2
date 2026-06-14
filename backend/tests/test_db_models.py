@@ -15,6 +15,37 @@ def test_evidence_units_have_source_ref_column():
     assert "source_ref" in table.columns
 
 
+def test_analysis_tasks_have_model_profile_column():
+    table = Base.metadata.tables["analysis_tasks"]
+
+    assert "model_profile" in table.columns
+
+
+def test_task_steps_have_worker_retry_and_progress_columns():
+    table = Base.metadata.tables["task_steps"]
+
+    for column_name in (
+        "locked_until",
+        "attempt_count",
+        "max_attempts",
+        "progress_payload",
+        "error_code",
+    ):
+        assert column_name in table.columns
+
+
+def test_evidence_units_have_domain_alignment_columns():
+    table = Base.metadata.tables["evidence_units"]
+
+    for column_name in (
+        "category",
+        "content",
+        "structured_data",
+        "confidence_score",
+    ):
+        assert column_name in table.columns
+
+
 def test_new_schema_contains_expected_unique_constraints():
     expected_constraints = {
         "files": {"uq_files_user_sha256"},
