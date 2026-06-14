@@ -1,9 +1,11 @@
+import pytest
+
 from app.domain.scoring.dimensions import SCORING_DIMENSIONS
 from app.domain.scoring.rubric import baseline_score_allowed
 
 
 def test_scoring_dimensions_sum_to_100():
-    assert sum(d.max_score for d in SCORING_DIMENSIONS) == 100
+    assert sum(d.max_score for d in SCORING_DIMENSIONS) == pytest.approx(100)
 
 
 def test_problem_dimension_fails_baseline_without_problem_evidence():
@@ -22,3 +24,24 @@ def test_market_dimension_fails_baseline_without_market_evidence():
     )
 
     assert allowed is False
+
+
+def test_baseline_allows_score_when_required_evidence_exists():
+    allowed = baseline_score_allowed(
+        dimension_key="product_solution",
+        evidence_categories={"product"},
+    )
+
+    assert allowed is True
+
+
+def test_unknown_dimension_key_raises_clear_error():
+    with pytest.raises(ValueError, match="unknown scoring dimension.*not_a_dimension"):
+        baseline_score_allowed(
+            dimension_key="not_a_dimension",
+            evidence_categories={"product"},
+        )
+
+
+def test_all_dimensions_have_required_category():
+    assert all(d.required_category for d in SCORING_DIMENSIONS)
