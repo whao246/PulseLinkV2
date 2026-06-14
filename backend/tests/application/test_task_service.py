@@ -1,3 +1,6 @@
+from datetime import datetime, timedelta, timezone
+from unittest.mock import MagicMock
+
 import pytest
 from sqlalchemy import create_engine, event
 from sqlalchemy.exc import IntegrityError
@@ -7,6 +10,7 @@ import app.infrastructure.db.models  # noqa: F401
 from app.application.task_service import TaskService
 from app.infrastructure.db.base import Base
 from app.infrastructure.db.models import AnalysisTask, File, TaskStep, User
+from app.infrastructure.db.repositories.tasks import TaskRepository
 
 
 @pytest.fixture
@@ -131,6 +135,9 @@ def test_task_service_publishes_new_task_once(db_session):
     )
 
     assert queue_publisher.published_task_ids == [task.id]
+    assert task.payload["queue_publish_status"] == "published"
+    assert "queue_publish_claimed_at" not in task.payload
+    assert "queue_publish_token" not in task.payload
 
 
 def test_task_service_uses_saved_task_id_after_publish_claim(db_session, monkeypatch):
@@ -197,6 +204,8 @@ def test_task_service_retries_publish_for_existing_unpublished_task(db_session):
         .one()
     )
     assert task_after_failure.payload["queue_publish_status"] == "pending"
+    assert "queue_publish_claimed_at" not in task_after_failure.payload
+    assert "queue_publish_token" not in task_after_failure.payload
 
     retried = service.create_task(
         user_id="usr_1",
@@ -214,6 +223,7 @@ def test_task_service_retries_publish_for_existing_unpublished_task(db_session):
 
 
 def test_task_service_does_not_publish_when_existing_task_is_already_claimed(db_session):
+    now = datetime(2026, 6, 14, 12, 0, tzinfo=timezone.utc)
     existing_service = TaskService(db_session=db_session, queue_publisher=None)
     existing = existing_service.create_task(
         user_id="usr_1",
@@ -221,12 +231,17 @@ def test_task_service_does_not_publish_when_existing_task_is_already_claimed(db_
         idempotency_key="idem_publish_claimed",
         options={},
     )
-    existing.payload = {"queue_publish_status": "publishing"}
+    existing.payload = {
+        "queue_publish_status": "publishing",
+        "queue_publish_claimed_at": now.isoformat(),
+        "queue_publish_token": "fresh-token",
+    }
     db_session.add(existing)
     db_session.commit()
 
     queue_publisher = QueuePublisherSpy()
     service = TaskService(db_session=db_session, queue_publisher=queue_publisher)
+    service.tasks = TaskRepository(db_session, now_provider=lambda: now)
 
     retried = service.create_task(
         user_id="usr_1",
@@ -238,6 +253,142 @@ def test_task_service_does_not_publish_when_existing_task_is_already_claimed(db_
     assert retried.id == existing.id
     assert queue_publisher.published_task_ids == []
     assert retried.payload["queue_publish_status"] == "publishing"
+
+
+def test_task_service_reclaims_stale_publish_claim(db_session):
+    now = datetime(2026, 6, 14, 12, 0, tzinfo=timezone.utc)
+    existing_service = TaskService(db_session=db_session, queue_publisher=None)
+    existing = existing_service.create_task(
+        user_id="usr_1",
+        file_id="file_1",
+        idempotency_key="idem_stale_publish_claim",
+        options={},
+    )
+    existing.payload = {
+        "queue_publish_status": "publishing",
+        "queue_publish_claimed_at": (now - timedelta(seconds=61)).isoformat(),
+        "queue_publish_token": "stale-token",
+    }
+    db_session.add(existing)
+    db_session.commit()
+
+    queue_publisher = QueuePublisherSpy()
+    service = TaskService(db_session=db_session, queue_publisher=queue_publisher)
+    service.tasks = TaskRepository(db_session, now_provider=lambda: now)
+
+    retried = service.create_task(
+        user_id="usr_1",
+        file_id="file_1",
+        idempotency_key="idem_stale_publish_claim",
+        options={},
+    )
+
+    assert queue_publisher.published_task_ids == [existing.id]
+    assert retried.payload["queue_publish_status"] == "published"
+    assert "queue_publish_claimed_at" not in retried.payload
+    assert "queue_publish_token" not in retried.payload
+
+
+@pytest.mark.parametrize("claim_lease_seconds", [0, 60])
+def test_task_service_reclaims_publish_claim_at_lease_boundary(
+    db_session, claim_lease_seconds
+):
+    now = datetime(2026, 6, 14, 12, 0, tzinfo=timezone.utc)
+    existing_service = TaskService(db_session=db_session, queue_publisher=None)
+    existing = existing_service.create_task(
+        user_id="usr_1",
+        file_id="file_1",
+        idempotency_key=f"idem_publish_boundary_{claim_lease_seconds}",
+        options={},
+    )
+    existing.payload = {
+        "queue_publish_status": "publishing",
+        "queue_publish_claimed_at": (
+            now - timedelta(seconds=claim_lease_seconds)
+        ).isoformat(),
+        "queue_publish_token": "expired-token",
+    }
+    db_session.add(existing)
+    db_session.commit()
+
+    queue_publisher = QueuePublisherSpy()
+    service = TaskService(db_session=db_session, queue_publisher=queue_publisher)
+    service.tasks = TaskRepository(
+        db_session,
+        now_provider=lambda: now,
+        claim_lease_seconds=claim_lease_seconds,
+    )
+
+    retried = service.create_task(
+        user_id="usr_1",
+        file_id="file_1",
+        idempotency_key=f"idem_publish_boundary_{claim_lease_seconds}",
+        options={},
+    )
+
+    assert queue_publisher.published_task_ids == [existing.id]
+    assert retried.payload["queue_publish_status"] == "published"
+
+
+def test_task_service_compares_naive_now_provider_as_utc(db_session):
+    now = datetime(2026, 6, 14, 12, 0)
+    existing_service = TaskService(db_session=db_session, queue_publisher=None)
+    existing = existing_service.create_task(
+        user_id="usr_1",
+        file_id="file_1",
+        idempotency_key="idem_naive_now",
+        options={},
+    )
+    existing.payload = {
+        "queue_publish_status": "publishing",
+        "queue_publish_claimed_at": "2026-06-14T11:59:30+00:00",
+        "queue_publish_token": "fresh-token",
+    }
+    db_session.add(existing)
+    db_session.commit()
+
+    queue_publisher = QueuePublisherSpy()
+    service = TaskService(db_session=db_session, queue_publisher=queue_publisher)
+    service.tasks = TaskRepository(db_session, now_provider=lambda: now)
+
+    retried = service.create_task(
+        user_id="usr_1",
+        file_id="file_1",
+        idempotency_key="idem_naive_now",
+        options={},
+    )
+
+    assert queue_publisher.published_task_ids == []
+    assert retried.payload["queue_publish_token"] == "fresh-token"
+
+
+def test_task_service_reclaims_legacy_publish_claim_without_timestamp(db_session):
+    existing_service = TaskService(db_session=db_session, queue_publisher=None)
+    existing = existing_service.create_task(
+        user_id="usr_1",
+        file_id="file_1",
+        idempotency_key="idem_legacy_publish_claim",
+        options={},
+    )
+    existing.payload = {
+        "queue_publish_status": "publishing",
+        "queue_publish_token": "legacy-token",
+    }
+    db_session.add(existing)
+    db_session.commit()
+
+    queue_publisher = QueuePublisherSpy()
+    service = TaskService(db_session=db_session, queue_publisher=queue_publisher)
+
+    retried = service.create_task(
+        user_id="usr_1",
+        file_id="file_1",
+        idempotency_key="idem_legacy_publish_claim",
+        options={},
+    )
+
+    assert queue_publisher.published_task_ids == [existing.id]
+    assert retried.payload["queue_publish_status"] == "published"
 
 
 def test_task_service_does_not_republish_when_existing_task_is_published(db_session):
@@ -340,7 +491,97 @@ def test_task_service_recovers_from_idempotency_integrity_error(db_session, monk
     assert recovered.id == existing_id
     assert db_session.query(AnalysisTask).count() == 1
     assert db_session.query(TaskStep).count() == 8
+    assert queue_publisher.published_task_ids == [existing_id]
+    assert recovered.payload["queue_publish_status"] == "published"
+
+
+def test_task_service_integrity_recovery_does_not_republish_published_task(
+    db_session, monkeypatch
+):
+    existing_service = TaskService(db_session=db_session, queue_publisher=None)
+    existing = existing_service.create_task(
+        user_id="usr_1",
+        file_id="file_1",
+        idempotency_key="idem_integrity_published",
+        options={},
+    )
+    existing.payload = {"queue_publish_status": "published"}
+    db_session.add(existing)
+    db_session.commit()
+    existing_id = existing.id
+    db_session.expunge_all()
+
+    queue_publisher = QueuePublisherSpy()
+    service = TaskService(db_session=db_session, queue_publisher=queue_publisher)
+    original_get = service.tasks.get_by_idempotency_key
+    get_calls = 0
+
+    def fake_get_by_idempotency_key(user_id, idempotency_key):
+        nonlocal get_calls
+        get_calls += 1
+        if get_calls == 1:
+            return None
+        return original_get(user_id, idempotency_key)
+
+    original_commit = db_session.commit
+    commit_calls = 0
+
+    def fake_commit():
+        nonlocal commit_calls
+        commit_calls += 1
+        if commit_calls == 1:
+            raise IntegrityError("insert", {}, Exception("unique constraint"))
+        return original_commit()
+
+    monkeypatch.setattr(service.tasks, "get_by_idempotency_key", fake_get_by_idempotency_key)
+    monkeypatch.setattr(db_session, "commit", fake_commit)
+
+    recovered = service.create_task(
+        user_id="usr_1",
+        file_id="file_1",
+        idempotency_key="idem_integrity_published",
+        options={},
+    )
+
+    assert recovered.id == existing_id
     assert queue_publisher.published_task_ids == []
+    assert recovered.payload["queue_publish_status"] == "published"
+
+
+def test_claim_queue_publish_locks_task_row():
+    db_session = MagicMock()
+    filtered_query = db_session.query.return_value.filter.return_value
+    locked_query = filtered_query.with_for_update.return_value
+    locked_query.one_or_none.return_value = None
+    repository = TaskRepository(db_session)
+
+    assert repository.claim_queue_publish("task_1") is None
+    filtered_query.with_for_update.assert_called_once_with()
+
+
+def test_stale_publish_failure_does_not_release_newer_claim(db_session):
+    service = TaskService(db_session=db_session, queue_publisher=None)
+    task = service.create_task(
+        user_id="usr_1",
+        file_id="file_1",
+        idempotency_key="idem_stale_failure",
+        options={},
+    )
+    repository = TaskRepository(db_session)
+
+    claim_token = repository.claim_queue_publish(task.id)
+    task.payload = {
+        **task.payload,
+        "queue_publish_token": "newer-token",
+    }
+    db_session.add(task)
+    db_session.commit()
+
+    repository.mark_queue_publish_pending(task.id, claim_token=claim_token)
+
+    db_session.refresh(task)
+    assert task.payload["queue_publish_status"] == "publishing"
+    assert task.payload["queue_publish_token"] == "newer-token"
 
 
 def test_task_service_list_steps_orders_unknown_steps_stably(db_session):

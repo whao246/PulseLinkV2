@@ -47,6 +47,7 @@ class TaskService:
             self.db_session.rollback()
             existing = self.tasks.get_by_idempotency_key(user_id, idempotency_key)
             if existing is not None:
+                self._publish_if_needed(existing)
                 return existing
             raise
 
@@ -58,13 +59,17 @@ class TaskService:
             return
 
         task_id = task.id
-        if not self.tasks.claim_queue_publish(task_id):
+        claim_token = self.tasks.claim_queue_publish(task_id)
+        if claim_token is None:
             return
 
         try:
             self.queue_publisher.publish_analyze_document(task_id=task_id)
         except Exception:
-            self.tasks.mark_queue_publish_pending(task_id)
+            self.tasks.mark_queue_publish_pending(
+                task_id,
+                claim_token=claim_token,
+            )
             raise
 
         # This claim prevents duplicate enqueue from concurrent API retries. The
