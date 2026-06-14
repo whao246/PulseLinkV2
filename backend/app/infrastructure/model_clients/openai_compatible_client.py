@@ -37,13 +37,27 @@ class OpenAICompatibleClient:
         response.raise_for_status()
 
         try:
-            content = response.json()["choices"][0]["message"]["content"]
+            payload = response.json()
+        except json.JSONDecodeError as exc:
+            raise ValueError("invalid model response schema") from exc
+
+        try:
+            choices = payload["choices"]
+            message = choices[0]["message"]
+            content = message["content"]
+        except (KeyError, IndexError, TypeError) as exc:
+            raise ValueError("invalid model response schema") from exc
+
+        if not isinstance(content, str):
+            raise ValueError("invalid model response schema")
+
+        try:
             parsed = json.loads(content)
-        except (KeyError, IndexError, TypeError, json.JSONDecodeError) as exc:
+        except json.JSONDecodeError as exc:
             raise ValueError("invalid model JSON") from exc
 
         if not isinstance(parsed, dict):
-            raise ValueError("invalid model JSON")
+            raise ValueError("invalid model JSON: expected object")
 
         return parsed
 
