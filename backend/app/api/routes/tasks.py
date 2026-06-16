@@ -60,6 +60,11 @@ def create_task(
         return ok(
             {
                 "task_id": task.id,
+                "task": {
+                    "id": task.id,
+                    "status": task.status,
+                    "file_id": payload.file_id,
+                },
                 "file_id": payload.file_id,
                 "idempotency_key": idempotency_key,
                 "status": task.status,
@@ -67,9 +72,15 @@ def create_task(
             request,
         )
 
+    task_id = f"task_{uuid4().hex}"
     return ok(
         {
-            "task_id": f"task_{uuid4().hex}",
+            "task_id": task_id,
+            "task": {
+                "id": task_id,
+                "status": "queued",
+                "file_id": payload.file_id,
+            },
             "file_id": payload.file_id,
             "idempotency_key": idempotency_key,
             "status": "queued",

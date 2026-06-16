@@ -1,7 +1,11 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Request
+from typing import Annotated
+from uuid import uuid4
 
+from fastapi import APIRouter, Header, Request
+
+from app.api.schemas.files import FileRegistrationRequest
 from app.core.responses import ok
 
 
@@ -15,5 +19,23 @@ def create_upload_presign(request: Request):
 
 
 @router.post("")
-def register_file(request: Request):
-    return ok({"file_id": None}, request)
+def register_file(
+    payload: FileRegistrationRequest,
+    request: Request,
+    idempotency_key: Annotated[str | None, Header(alias="Idempotency-Key")] = None,
+):
+    file_id = f"file_{uuid4().hex}"
+    return ok(
+        {
+            "file_id": file_id,
+            "file": {
+                "id": file_id,
+                "filename": payload.filename,
+                "content_type": payload.content_type,
+                "size_bytes": payload.size_bytes,
+                "storage_uri": payload.storage_uri,
+                "idempotency_key": idempotency_key,
+            },
+        },
+        request,
+    )
