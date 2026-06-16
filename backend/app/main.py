@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from fastapi import FastAPI
 
-from app.api.routes import health
+from app.api.routes import auth, files, health, reports, tasks
 
 
 def create_app(
@@ -13,7 +13,15 @@ def create_app(
     app = FastAPI(title="PulseLinkV2 API")
     app.state.database_url = database_url
     app.state.run_analysis_inline = run_analysis_inline
-    app.include_router(health.router)
+    for router in [
+        health.router,
+        auth.router,
+        files.uploads_router,
+        files.router,
+        tasks.router,
+        reports.router,
+    ]:
+        app.include_router(router)
     return app
 
 
