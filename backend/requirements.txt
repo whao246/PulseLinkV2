@@ -1,0 +1,9 @@
+debugpy==1.8.11
+fastapi
+httpx
+pydantic
+pymysql
+redis
+rq
+sqlalchemy
+uvicorn

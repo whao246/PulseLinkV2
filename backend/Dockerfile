@@ -6,15 +6,8 @@ ENV PYTHONPATH=/app/backend
 
 WORKDIR /app
 
-RUN pip install --no-cache-dir \
-    fastapi \
-    httpx \
-    pymysql \
-    pydantic \
-    redis \
-    rq \
-    sqlalchemy \
-    uvicorn
+COPY backend/requirements.txt /tmp/pulselink-requirements.txt
+RUN pip install --no-cache-dir -r /tmp/pulselink-requirements.txt
 
 COPY backend /app/backend
 
