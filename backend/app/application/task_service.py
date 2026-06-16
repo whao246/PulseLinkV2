@@ -32,7 +32,7 @@ class TaskService:
             file_id=file_id,
             idempotency_key=idempotency_key,
             status=TaskStatus.QUEUED.value,
-            model_profile=options.get("model_profile"),
+            model_profile=options.get("model_profile", "default"),
         )
         for step_name in PIPELINE_STEP_NAMES:
             self.tasks.create_step(

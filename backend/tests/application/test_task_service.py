@@ -186,6 +186,19 @@ def test_task_service_persists_model_profile_option(db_session):
     assert task.model_profile == "MiniMax-M3"
 
 
+def test_task_service_uses_default_model_profile(db_session):
+    service = TaskService(db_session=db_session, queue_publisher=None)
+
+    task = service.create_task(
+        user_id="usr_1",
+        file_id="file_1",
+        idempotency_key="idem_default_model",
+        options={},
+    )
+
+    assert task.model_profile == "default"
+
+
 def test_task_service_retries_publish_for_existing_unpublished_task(db_session):
     queue_publisher = FailsOnceQueuePublisherSpy()
     service = TaskService(db_session=db_session, queue_publisher=queue_publisher)
