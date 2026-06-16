@@ -7,6 +7,7 @@ from fastapi import APIRouter, Header, Request
 from fastapi.responses import JSONResponse
 
 from app.api.schemas.tasks import TaskCreateRequest
+from app.application.task_service import TaskService
 from app.core.responses import ok
 
 
@@ -72,18 +73,35 @@ def create_task(
             request,
         )
 
-    task_id = f"task_{uuid4().hex}"
+    session_factory = getattr(request.app.state, "db_session_factory", None)
+    if session_factory is None:
+        raise RuntimeError("database is not configured")
+
+    db_session = session_factory()
+    try:
+        task = TaskService(
+            db_session=db_session,
+            queue_publisher=getattr(request.app.state, "queue_publisher", None),
+        ).create_task(
+            user_id="local-test-user",
+            file_id=payload.file_id,
+            idempotency_key=idempotency_key,
+            options=payload.options,
+        )
+    finally:
+        db_session.close()
+
     return ok(
         {
-            "task_id": task_id,
+            "task_id": task.id,
             "task": {
-                "id": task_id,
-                "status": "queued",
+                "id": task.id,
+                "status": task.status,
                 "file_id": payload.file_id,
             },
             "file_id": payload.file_id,
             "idempotency_key": idempotency_key,
-            "status": "queued",
+            "status": task.status,
         },
         request,
     )

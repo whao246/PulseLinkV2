@@ -8,3 +8,4 @@ class FileRegistrationRequest(BaseModel):
     content_type: str | None = None
     size_bytes: int | None = None
     storage_uri: str
+    sha256: str | None = None
