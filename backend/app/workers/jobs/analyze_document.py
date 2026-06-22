@@ -2,12 +2,23 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+from uuid import uuid4
 
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
+from app.domain.analysis.pipeline import PIPELINE_STEP_NAMES
 from app.domain.tasks.state_machine import StepStatus, TaskStatus
-from app.infrastructure.db.models import AnalysisTask, File, Report, ScoreResult, TaskStep
+from app.infrastructure.db.models import (
+    AnalysisTask,
+    DocumentPage,
+    EvidenceUnit,
+    File,
+    PageArtifact,
+    Report,
+    ScoreResult,
+    TaskStep,
+)
 from app.pipeline.offline import analyze_pdf_offline
 
 
@@ -45,17 +56,15 @@ class DatabaseAnalysisOrchestrator:
             db_session.commit()
 
             try:
-                file = db_session.query(File).filter_by(id=task.file_id).one()
-                pdf_path = _local_pdf_path(file.storage_uri)
-                result = analyze_pdf_offline(pdf_path, artifact_dir=self.artifact_dir)
-                self._mark_steps_succeeded(db_session, task_id=task_id)
-                self._write_score(db_session, task_id=task_id, result=result)
-                self._write_report(
-                    db_session,
-                    task_id=task_id,
-                    file=file,
-                    result=result,
-                )
+                context = {"task": task}
+                for order, step_name in enumerate(PIPELINE_STEP_NAMES):
+                    self._run_step(
+                        db_session,
+                        task_id=task_id,
+                        step_name=step_name,
+                        order=order,
+                        context=context,
+                    )
                 task.status = TaskStatus.COMPLETED.value
                 task.error_message = None
                 db_session.add(task)
@@ -71,11 +80,170 @@ class DatabaseAnalysisOrchestrator:
         finally:
             db_session.close()
 
-    def _mark_steps_succeeded(self, db_session, *, task_id: str) -> None:
-        steps = db_session.query(TaskStep).filter_by(task_id=task_id).all()
-        for step in steps:
-            step.status = StepStatus.SUCCEEDED.value
+    def _run_step(
+        self,
+        db_session,
+        *,
+        task_id: str,
+        step_name: str,
+        order: int,
+        context: dict,
+    ) -> None:
+        step = (
+            db_session.query(TaskStep)
+            .filter_by(task_id=task_id, step_name=step_name)
+            .one()
+        )
+        step.status = StepStatus.RUNNING.value
+        step.error_message = None
+        step.payload = {"order": order, "completed": False}
+        db_session.add(step)
+        db_session.commit()
+
+        try:
+            payload = getattr(self, f"_step_{step_name}")(db_session, context)
+        except Exception as exc:
+            db_session.rollback()
+            step = (
+                db_session.query(TaskStep)
+                .filter_by(task_id=task_id, step_name=step_name)
+                .one()
+            )
+            step.status = StepStatus.FAILED.value
+            step.error_message = str(exc)
+            step.payload = {"order": order, "completed": False}
             db_session.add(step)
+            db_session.commit()
+            raise
+
+        step = (
+            db_session.query(TaskStep)
+            .filter_by(task_id=task_id, step_name=step_name)
+            .one()
+        )
+        step.status = StepStatus.SUCCEEDED.value
+        step.payload = {"order": order, "completed": True, **(payload or {})}
+        db_session.add(step)
+        db_session.commit()
+
+    def _step_load_document(self, db_session, context: dict) -> dict:
+        task = context["task"]
+        file = db_session.query(File).filter_by(id=task.file_id).one()
+        pdf_path = _local_pdf_path(file.storage_uri)
+        context["file"] = file
+        context["pdf_path"] = pdf_path
+        return {
+            "file_id": file.id,
+            "filename": file.filename,
+            "storage_uri": file.storage_uri,
+        }
+
+    def _step_parse_text_layout(self, db_session, context: dict) -> dict:
+        task = context["task"]
+        result = analyze_pdf_offline(context["pdf_path"], artifact_dir=self.artifact_dir)
+        context["analysis_result"] = result
+        page_count = result.parse_summary.page_count
+        for page_number in range(1, page_count + 1):
+            page = (
+                db_session.query(DocumentPage)
+                .filter_by(task_id=task.id, page_number=page_number)
+                .one_or_none()
+            )
+            if page is None:
+                page = DocumentPage(
+                    id=f"page_{uuid4().hex}",
+                    task_id=task.id,
+                    page_number=page_number,
+                )
+            page.text = f"Page {page_number} extracted placeholder text"
+            page.metadata_json = {
+                "source": "offline_parser",
+                "block_count": result.parse_summary.block_count,
+            }
+            db_session.add(page)
+        return _parse_summary_payload(result)
+
+    def _step_detect_tables_and_figures(self, db_session, context: dict) -> dict:
+        result = context["analysis_result"]
+        return {
+            "table_count": result.parse_summary.table_count,
+            "figure_count": 0,
+        }
+
+    def _step_render_candidate_pages(self, db_session, context: dict) -> dict:
+        task = context["task"]
+        pages = (
+            db_session.query(DocumentPage)
+            .filter_by(task_id=task.id)
+            .order_by(DocumentPage.page_number)
+            .all()
+        )
+        created = 0
+        for page in pages[: min(3, len(pages))]:
+            artifact = PageArtifact(
+                id=f"artifact_{uuid4().hex}",
+                task_id=task.id,
+                page_id=page.id,
+                artifact_type="page_render_placeholder",
+                storage_uri=f"artifact://{task.id}/page-{page.page_number}.txt",
+                payload={"page_number": page.page_number},
+            )
+            db_session.add(artifact)
+            created += 1
+        return {"artifact_count": created}
+
+    def _step_vision_understanding(self, db_session, context: dict) -> dict:
+        result = context["analysis_result"]
+        return {
+            "fallback": True,
+            "table_count": result.parse_summary.table_count,
+        }
+
+    def _step_build_evidence_units(self, db_session, context: dict) -> dict:
+        task = context["task"]
+        result = context["analysis_result"]
+        evidence_count = max(1, min(result.parse_summary.evidence_unit_count, 8))
+        for index in range(evidence_count):
+            source_ref = f"offline:{index + 1}"
+            evidence = (
+                db_session.query(EvidenceUnit)
+                .filter_by(
+                    task_id=task.id,
+                    source_type="offline_pdf",
+                    source_ref=source_ref,
+                )
+                .one_or_none()
+            )
+            if evidence is None:
+                evidence = EvidenceUnit(
+                    id=f"evidence_{uuid4().hex}",
+                    task_id=task.id,
+                    source_type="offline_pdf",
+                    source_ref=source_ref,
+                )
+            evidence.page_number = index + 1
+            evidence.category = "commercial_progress"
+            evidence.content = f"Offline evidence unit {index + 1}"
+            evidence.structured_data = {"source": "offline_pipeline"}
+            evidence.confidence_score = 0.6
+            db_session.add(evidence)
+        return {"evidence_unit_count": evidence_count}
+
+    def _step_score_and_judge(self, db_session, context: dict) -> dict:
+        result = context["analysis_result"]
+        self._write_score(db_session, task_id=context["task"].id, result=result)
+        return {
+            "potential_score": result.score_result.potential_score,
+        }
+
+    def _step_assemble_report(self, db_session, context: dict) -> dict:
+        self._write_report(
+            db_session,
+            task_id=context["task"].id,
+            file=context["file"],
+            result=context["analysis_result"],
+        )
+        return {"report_status": "ready"}
 
     def _write_score(self, db_session, *, task_id: str, result) -> None:
         score = db_session.query(ScoreResult).filter_by(task_id=task_id).one_or_none()
