@@ -8,7 +8,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from app.domain.analysis.pipeline import PIPELINE_STEP_NAMES
-from app.domain.tasks.state_machine import StepStatus, TaskStatus
+from app.domain.tasks.state_machine import StepStatus, TaskStatus, can_retry_step
 from app.infrastructure.db.models import (
     AnalysisTask,
     DocumentPage,
@@ -72,7 +72,11 @@ class DatabaseAnalysisOrchestrator:
             except Exception as exc:
                 db_session.rollback()
                 task = db_session.query(AnalysisTask).filter_by(id=task_id).one()
-                task.status = TaskStatus.FAILED.value
+                task.status = (
+                    TaskStatus.QUEUED.value
+                    if _has_retrying_step(db_session, task_id=task_id)
+                    else TaskStatus.FAILED.value
+                )
                 task.error_message = str(exc)
                 db_session.add(task)
                 db_session.commit()
@@ -95,8 +99,13 @@ class DatabaseAnalysisOrchestrator:
             .one()
         )
         step.status = StepStatus.RUNNING.value
+        step.attempt_count = (step.attempt_count or 0) + 1
         step.error_message = None
-        step.payload = {"order": order, "completed": False}
+        step.payload = {
+            "order": order,
+            "completed": False,
+            "attempt_count": step.attempt_count,
+        }
         db_session.add(step)
         db_session.commit()
 
@@ -109,9 +118,23 @@ class DatabaseAnalysisOrchestrator:
                 .filter_by(task_id=task_id, step_name=step_name)
                 .one()
             )
-            step.status = StepStatus.FAILED.value
+            retry_available = can_retry_step(
+                StepStatus.FAILED,
+                attempt_count=step.attempt_count or 0,
+                max_attempts=step.max_attempts or 1,
+            )
+            step.status = (
+                StepStatus.RETRYING.value
+                if retry_available
+                else StepStatus.FAILED.value
+            )
             step.error_message = str(exc)
-            step.payload = {"order": order, "completed": False}
+            step.payload = {
+                "order": order,
+                "completed": False,
+                "attempt_count": step.attempt_count,
+                "retry_available": retry_available,
+            }
             db_session.add(step)
             db_session.commit()
             raise
@@ -122,7 +145,12 @@ class DatabaseAnalysisOrchestrator:
             .one()
         )
         step.status = StepStatus.SUCCEEDED.value
-        step.payload = {"order": order, "completed": True, **(payload or {})}
+        step.payload = {
+            "order": order,
+            "completed": True,
+            "attempt_count": step.attempt_count,
+            **(payload or {}),
+        }
         db_session.add(step)
         db_session.commit()
 
@@ -292,3 +320,12 @@ def _parse_summary_payload(result) -> dict:
         "table_count": summary.table_count,
         "evidence_unit_count": summary.evidence_unit_count,
     }
+
+
+def _has_retrying_step(db_session, *, task_id: str) -> bool:
+    return (
+        db_session.query(TaskStep)
+        .filter_by(task_id=task_id, status=StepStatus.RETRYING.value)
+        .first()
+        is not None
+    )

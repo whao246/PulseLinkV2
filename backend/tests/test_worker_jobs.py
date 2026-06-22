@@ -132,7 +132,7 @@ def test_analyze_document_job_completes_task_and_writes_report(tmp_path, monkeyp
         session.close()
 
 
-def test_analyze_document_job_marks_failed_step_and_task(tmp_path, monkeypatch):
+def test_analyze_document_job_marks_retrying_when_step_can_retry(tmp_path, monkeypatch):
     database_url = f"sqlite:///{tmp_path / 'worker-failed.db'}"
     engine = create_engine(database_url)
     Base.metadata.create_all(engine)
@@ -201,9 +201,88 @@ def test_analyze_document_job_marks_failed_step_and_task(tmp_path, monkeypatch):
             .one()
         )
 
+        assert task.status == TaskStatus.QUEUED.value
+        assert "unsupported storage_uri" in task.error_message
+        assert load_step.status == StepStatus.RETRYING.value
+        assert load_step.attempt_count == 1
+        assert "unsupported storage_uri" in load_step.error_message
+    finally:
+        session.close()
+
+
+def test_analyze_document_job_marks_failed_when_step_retries_exhausted(tmp_path, monkeypatch):
+    database_url = f"sqlite:///{tmp_path / 'worker-exhausted.db'}"
+    engine = create_engine(database_url)
+    Base.metadata.create_all(engine)
+    SessionLocal = sessionmaker(bind=engine)
+
+    session = SessionLocal()
+    try:
+        session.add(
+            User(
+                id="usr_worker",
+                email="usr_worker@example.com",
+                display_name="Worker User",
+                is_active=True,
+            )
+        )
+        session.add(
+            File(
+                id="file_worker",
+                user_id="usr_worker",
+                sha256="sha_worker",
+                filename="sample.pdf",
+                content_type="application/pdf",
+                storage_uri="cos://bucket/sample.pdf",
+            )
+        )
+        session.add(
+            AnalysisTask(
+                id="task_worker_exhausted",
+                user_id="usr_worker",
+                file_id="file_worker",
+                idempotency_key="idem_worker_exhausted",
+                task_type="bp_analysis",
+                model_profile="default",
+                status=TaskStatus.QUEUED.value,
+            )
+        )
+        for step_name in PIPELINE_STEP_NAMES:
+            session.add(
+                TaskStep(
+                    id=f"exhausted_step_{step_name}",
+                    task_id="task_worker_exhausted",
+                    step_name=step_name,
+                    status=StepStatus.PENDING.value,
+                    attempt_count=0,
+                    max_attempts=1,
+                )
+            )
+        session.commit()
+    finally:
+        session.close()
+
+    monkeypatch.setenv("DATABASE_URL", database_url)
+    monkeypatch.setenv("ARTIFACT_DIR", str(tmp_path / "artifacts"))
+
+    try:
+        run(task_id="task_worker_exhausted")
+    except ValueError:
+        pass
+
+    session = SessionLocal()
+    try:
+        task = session.query(AnalysisTask).filter_by(id="task_worker_exhausted").one()
+        load_step = (
+            session.query(TaskStep)
+            .filter_by(task_id="task_worker_exhausted", step_name="load_document")
+            .one()
+        )
+
         assert task.status == TaskStatus.FAILED.value
         assert "unsupported storage_uri" in task.error_message
         assert load_step.status == StepStatus.FAILED.value
+        assert load_step.attempt_count == 1
         assert "unsupported storage_uri" in load_step.error_message
     finally:
         session.close()
