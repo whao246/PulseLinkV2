@@ -19,6 +19,7 @@ from app.infrastructure.db.models import (
     ScoreResult,
     TaskStep,
 )
+from app.infrastructure.pdf_tools.reader import extract_page_texts
 from app.pipeline.offline import analyze_pdf_offline
 
 
@@ -171,22 +172,25 @@ class DatabaseAnalysisOrchestrator:
         result = analyze_pdf_offline(context["pdf_path"], artifact_dir=self.artifact_dir)
         context["analysis_result"] = result
         page_count = result.parse_summary.page_count
-        for page_number in range(1, page_count + 1):
+        extracted_pages = extract_page_texts(context["pdf_path"], page_count=page_count)
+        for page_text in extracted_pages:
             page = (
                 db_session.query(DocumentPage)
-                .filter_by(task_id=task.id, page_number=page_number)
+                .filter_by(task_id=task.id, page_number=page_text.page_number)
                 .one_or_none()
             )
             if page is None:
                 page = DocumentPage(
                     id=f"page_{uuid4().hex}",
                     task_id=task.id,
-                    page_number=page_number,
+                    page_number=page_text.page_number,
                 )
-            page.text = f"Page {page_number} extracted placeholder text"
+            page.text = page_text.text
             page.metadata_json = {
                 "source": "offline_parser",
+                "text_status": page_text.status,
                 "block_count": result.parse_summary.block_count,
+                "text_extraction": page_text.metadata,
             }
             db_session.add(page)
         return _parse_summary_payload(result)
@@ -212,7 +216,7 @@ class DatabaseAnalysisOrchestrator:
                 id=f"artifact_{uuid4().hex}",
                 task_id=task.id,
                 page_id=page.id,
-                artifact_type="page_render_placeholder",
+                artifact_type="page_render_summary",
                 storage_uri=f"artifact://{task.id}/page-{page.page_number}.txt",
                 payload={"page_number": page.page_number},
             )

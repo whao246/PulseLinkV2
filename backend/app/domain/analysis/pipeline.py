@@ -25,4 +25,4 @@ class PipelineStep(Protocol):
     name: str
 
     def run(self, context: AnalysisContext) -> AnalysisContext:
-        raise NotImplementedError
+        ...

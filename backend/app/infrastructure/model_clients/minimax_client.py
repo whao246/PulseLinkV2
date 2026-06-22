@@ -6,4 +6,4 @@ from app.infrastructure.model_clients.openai_compatible_client import (
 
 
 class MiniMaxClient(OpenAICompatibleClient):
-    pass
+    """MiniMax chat completions client using the OpenAI-compatible API shape."""

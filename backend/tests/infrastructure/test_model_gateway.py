@@ -1,4 +1,5 @@
 import json
+import base64
 
 import httpx
 import pytest
@@ -98,3 +99,34 @@ def test_openai_compatible_client_rejects_invalid_response_schema():
 
     with pytest.raises(ValueError, match="invalid model response schema"):
         client.complete_json(messages=[{"role": "user", "content": "hi"}])
+
+
+def test_openai_compatible_client_sends_image_as_data_url_and_parses_json():
+    image_bytes = b"fake-image"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert str(request.url) == "https://models.example.com/v1/chat/completions"
+        assert request.headers["Authorization"] == "Bearer key"
+        json_payload = json.loads(request.read())
+        assert json_payload["model"] == "MiniMax-M3"
+        assert json_payload["response_format"] == {"type": "json_object"}
+        content = json_payload["messages"][0]["content"]
+        assert content[0] == {"type": "text", "text": "extract table"}
+        assert content[1]["type"] == "image_url"
+        expected = base64.b64encode(image_bytes).decode("ascii")
+        assert content[1]["image_url"]["url"] == f"data:image/png;base64,{expected}"
+        return httpx.Response(
+            200,
+            json={"choices": [{"message": {"content": "{\"tables\": 2}"}}]},
+        )
+
+    client = OpenAICompatibleClient(
+        base_url="https://models.example.com/v1",
+        api_key="key",
+        model="MiniMax-M3",
+        http_client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+
+    assert client.understand_image_json(prompt="extract table", image_bytes=image_bytes) == {
+        "tables": 2
+    }

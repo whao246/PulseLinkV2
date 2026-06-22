@@ -123,6 +123,11 @@ def test_analyze_document_job_completes_task_and_writes_report(tmp_path, monkeyp
         )
         assert all(step.payload["completed"] is True for step in steps)
         assert len(pages) == 2
+        assert all("placeholder" not in (page.text or "") for page in pages)
+        assert {page.metadata_json["text_status"] for page in pages} <= {
+            "extracted",
+            "parser_unavailable",
+        }
         assert len(artifacts) >= 1
         assert len(evidence) >= 1
         assert report.status == "ready"
