@@ -8,12 +8,14 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from app.domain.analysis.pipeline import PIPELINE_STEP_NAMES
+from app.domain.scoring.dimensions import SCORING_DIMENSIONS
 from app.domain.tasks.state_machine import StepStatus, TaskStatus, can_retry_step
 from app.infrastructure.db.models import (
     AnalysisTask,
     DocumentPage,
     EvidenceUnit,
     File,
+    JudgmentCard,
     PageArtifact,
     Report,
     ScoreResult,
@@ -234,9 +236,9 @@ class DatabaseAnalysisOrchestrator:
     def _step_build_evidence_units(self, db_session, context: dict) -> dict:
         task = context["task"]
         result = context["analysis_result"]
-        evidence_count = max(1, min(result.parse_summary.evidence_unit_count, 8))
-        for index in range(evidence_count):
-            source_ref = f"offline:{index + 1}"
+        evidence_count = 0
+        for index, dimension in enumerate(SCORING_DIMENSIONS):
+            source_ref = f"offline:{dimension.key}"
             evidence = (
                 db_session.query(EvidenceUnit)
                 .filter_by(
@@ -253,19 +255,26 @@ class DatabaseAnalysisOrchestrator:
                     source_type="offline_pdf",
                     source_ref=source_ref,
                 )
-            evidence.page_number = index + 1
-            evidence.category = "commercial_progress"
-            evidence.content = f"Offline evidence unit {index + 1}"
-            evidence.structured_data = {"source": "offline_pipeline"}
+            evidence.page_number = min(index + 1, result.parse_summary.page_count)
+            evidence.category = dimension.required_category
+            evidence.content = f"BP 中存在与「{dimension.name}」相关的候选材料。"
+            evidence.structured_data = {
+                "source": "offline_pipeline",
+                "dimension_key": dimension.key,
+                "dimension_name": dimension.name,
+            }
             evidence.confidence_score = 0.6
             db_session.add(evidence)
+            evidence_count += 1
         return {"evidence_unit_count": evidence_count}
 
     def _step_score_and_judge(self, db_session, context: dict) -> dict:
         result = context["analysis_result"]
-        self._write_score(db_session, task_id=context["task"].id, result=result)
+        dimensions = self._write_score(db_session, task_id=context["task"].id, result=result)
+        context["score_dimensions"] = dimensions
         return {
-            "potential_score": result.score_result.potential_score,
+            "potential_score": sum(dimension["score"] for dimension in dimensions),
+            "dimension_count": len(dimensions),
         }
 
     def _step_assemble_report(self, db_session, context: dict) -> dict:
@@ -277,21 +286,32 @@ class DatabaseAnalysisOrchestrator:
         )
         return {"report_status": "ready"}
 
-    def _write_score(self, db_session, *, task_id: str, result) -> None:
+    def _write_score(self, db_session, *, task_id: str, result) -> list[dict]:
         score = db_session.query(ScoreResult).filter_by(task_id=task_id).one_or_none()
         if score is None:
             score = ScoreResult(id=f"score_{task_id}", task_id=task_id)
-        score.total_score = result.score_result.potential_score
+        dimensions = _build_dimension_scores(
+            db_session,
+            task_id=task_id,
+            result=result,
+        )
+        total_score = round(sum(dimension["score"] for dimension in dimensions), 2)
+        score.total_score = total_score
         score.score_payload = {
-            "potential_score": result.score_result.potential_score,
+            "potential_score": total_score,
+            "dimensions": dimensions,
             "parse_summary": _parse_summary_payload(result),
         }
         db_session.add(score)
+        _write_judgment_cards(db_session, task_id=task_id, dimensions=dimensions)
+        return dimensions
 
     def _write_report(self, db_session, *, task_id: str, file: File, result) -> None:
         report = db_session.query(Report).filter_by(task_id=task_id).one_or_none()
         if report is None:
             report = Report(id=f"report_{task_id}", task_id=task_id)
+        score = db_session.query(ScoreResult).filter_by(task_id=task_id).one_or_none()
+        score_payload = score.score_payload if score is not None else {}
         report.title = f"{file.filename} 分析报告"
         report.status = "ready"
         report.storage_uri = None
@@ -303,7 +323,8 @@ class DatabaseAnalysisOrchestrator:
             },
             "parse_summary": _parse_summary_payload(result),
             "score_result": {
-                "potential_score": result.score_result.potential_score,
+                "potential_score": score_payload.get("potential_score"),
+                "dimensions": score_payload.get("dimensions", []),
             },
         }
         db_session.add(report)
@@ -333,3 +354,201 @@ def _has_retrying_step(db_session, *, task_id: str) -> bool:
         .first()
         is not None
     )
+
+
+def _build_dimension_scores(db_session, *, task_id: str, result) -> list[dict]:
+    evidence_units = db_session.query(EvidenceUnit).filter_by(task_id=task_id).all()
+    evidence_by_category: dict[str, list[EvidenceUnit]] = {}
+    for evidence in evidence_units:
+        if evidence.category:
+            evidence_by_category.setdefault(evidence.category, []).append(evidence)
+
+    dimensions = []
+    for dimension in SCORING_DIMENSIONS:
+        related_evidence = evidence_by_category.get(dimension.required_category or "", [])
+        evidence_refs = [
+            {
+                "id": evidence.id,
+                "source_ref": evidence.source_ref,
+                "page_number": evidence.page_number,
+                "confidence_score": evidence.confidence_score,
+            }
+            for evidence in related_evidence[:3]
+        ]
+        score = _score_dimension(
+            max_score=dimension.max_score,
+            evidence_count=len(related_evidence),
+            table_count=result.parse_summary.table_count,
+            page_count=result.parse_summary.page_count,
+        )
+        guidance = _DIMENSION_GUIDANCE[dimension.key]
+        dimensions.append(
+            {
+                "key": dimension.key,
+                "name": dimension.name,
+                "score": score,
+                "max_score": dimension.max_score,
+                "reason": _dimension_reason(
+                    dimension_name=dimension.name,
+                    score=score,
+                    max_score=dimension.max_score,
+                    evidence_count=len(related_evidence),
+                ),
+                "evidence_refs": evidence_refs,
+                "suggestions_for_bp": guidance["suggestions_for_bp"],
+                "due_diligence_questions": guidance["due_diligence_questions"],
+            }
+        )
+    return dimensions
+
+
+def _score_dimension(
+    *,
+    max_score: float,
+    evidence_count: int,
+    table_count: int,
+    page_count: int,
+) -> float:
+    if evidence_count <= 0:
+        return 0.0
+    evidence_ratio = min(1.0, evidence_count / 2)
+    richness_ratio = min(1.0, (table_count + page_count) / 20)
+    score_ratio = 0.55 + 0.25 * evidence_ratio + 0.2 * richness_ratio
+    return round(max_score * min(score_ratio, 1.0), 2)
+
+
+def _dimension_reason(
+    *,
+    dimension_name: str,
+    score: float,
+    max_score: float,
+    evidence_count: int,
+) -> str:
+    if evidence_count <= 0:
+        return f"未检索到与「{dimension_name}」直接相关的结构化证据，因此该项暂不计分。"
+    if score >= max_score * 0.8:
+        return f"已检索到与「{dimension_name}」相关的候选证据，材料完整度较好，按当前离线规则给出较高分。"
+    return f"已检索到与「{dimension_name}」相关的候选证据，但证据强度和结构化程度仍需人工复核。"
+
+
+def _write_judgment_cards(db_session, *, task_id: str, dimensions: list[dict]) -> None:
+    for dimension in dimensions:
+        card = (
+            db_session.query(JudgmentCard)
+            .filter_by(task_id=task_id, dimension_key=dimension["key"])
+            .one_or_none()
+        )
+        if card is None:
+            card = JudgmentCard(
+                id=f"judgment_{task_id}_{dimension['key']}",
+                task_id=task_id,
+                dimension_key=dimension["key"],
+            )
+        card.verdict = _verdict_for_score(
+            score=dimension["score"],
+            max_score=dimension["max_score"],
+        )
+        card.rationale = dimension["reason"]
+        card.evidence_refs = dimension["evidence_refs"]
+        card.payload = {
+            "score": dimension["score"],
+            "max_score": dimension["max_score"],
+            "suggestions_for_bp": dimension["suggestions_for_bp"],
+            "due_diligence_questions": dimension["due_diligence_questions"],
+        }
+        db_session.add(card)
+
+
+def _verdict_for_score(*, score: float, max_score: float) -> str:
+    ratio = score / max_score if max_score else 0
+    if ratio >= 0.8:
+        return "strong"
+    if ratio >= 0.6:
+        return "acceptable"
+    if ratio > 0:
+        return "weak"
+    return "missing"
+
+
+_DIMENSION_GUIDANCE = {
+    "problem_need_strength": {
+        "suggestions_for_bp": [
+            "补充客户访谈、政策文件、行业报告等客观证据，证明痛点真实存在。",
+            "说明痛点的紧迫程度、影响范围和现有替代方案不足。",
+        ],
+        "due_diligence_questions": [
+            "访谈目标客户，确认痛点是否高频且有预算解决。",
+            "核验 BP 中引用的政策、调研和客户反馈来源。",
+        ],
+    },
+    "market_attractiveness": {
+        "suggestions_for_bp": [
+            "补充细分市场规模、增速、渗透率和国产化率等强相关数据。",
+            "优先引用头部咨询机构、协会或招股书等权威来源。",
+        ],
+        "due_diligence_questions": [
+            "复核市场规模口径是否与项目真实业务边界一致。",
+            "比较目标客户订单和行业增速是否匹配。",
+        ],
+    },
+    "product_solution": {
+        "suggestions_for_bp": [
+            "清晰说明产品如何回应前述痛点，以及核心竞争力来自哪里。",
+            "补充产品成熟度、稳定供应能力和竞品对比。",
+        ],
+        "due_diligence_questions": [
+            "验证产品 demo、交付记录和关键技术指标。",
+            "访谈客户确认产品优势是否真实可感知。",
+        ],
+    },
+    "business_model_unit_economics": {
+        "suggestions_for_bp": [
+            "说明客户类型、收费模式、销售周期和回款方式。",
+            "补充毛利率、获客成本、客单价和复购等单位经济指标。",
+        ],
+        "due_diligence_questions": [
+            "抽查合同和发票，确认收入确认方式。",
+            "测算规模化后毛利和现金流是否可持续。",
+        ],
+    },
+    "team_fit": {
+        "suggestions_for_bp": [
+            "补充核心团队研发、市场、产业资源和过往业绩。",
+            "突出创始人或核心团队与当前赛道的匹配度。",
+        ],
+        "due_diligence_questions": [
+            "核验核心成员履历、股权稳定性和分工。",
+            "评估团队短板是否需要通过招聘或顾问补足。",
+        ],
+    },
+    "commercialization_progress": {
+        "suggestions_for_bp": [
+            "补充产品研发、客户验证、订单、产能和认证进展。",
+            "提供过往三年财务数据和未来三年收入利润预测。",
+        ],
+        "due_diligence_questions": [
+            "核验客户订单、验收单、回款和在手 pipeline。",
+            "确认产能建设、认证节点和规模交付风险。",
+        ],
+    },
+    "competition_barriers": {
+        "suggestions_for_bp": [
+            "列出国内外竞对和对标上市公司，说明差异化定位。",
+            "突出资质、数据、渠道、工艺、先发优势等核心壁垒。",
+        ],
+        "due_diligence_questions": [
+            "访谈行业专家，判断壁垒是否可持续。",
+            "比较竞品价格、性能、渠道和客户重叠度。",
+        ],
+    },
+    "financing_logic_use_of_funds": {
+        "suggestions_for_bp": [
+            "明确融资金额、估值逻辑、资金用途和阶段目标。",
+            "说明后续融资、上市或并购退出路径。",
+        ],
+        "due_diligence_questions": [
+            "核验资金用途是否匹配当前阶段和未来里程碑。",
+            "评估估值、融资节奏和退出预期是否合理。",
+        ],
+    },
+}

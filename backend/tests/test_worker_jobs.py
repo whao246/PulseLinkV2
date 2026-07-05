@@ -12,6 +12,7 @@ from app.infrastructure.db.models import (
     DocumentPage,
     EvidenceUnit,
     File,
+    JudgmentCard,
     PageArtifact,
     Report,
     ScoreResult,
@@ -115,6 +116,9 @@ def test_analyze_document_job_completes_task_and_writes_report(tmp_path, monkeyp
         pages = session.query(DocumentPage).filter_by(task_id="task_worker").all()
         artifacts = session.query(PageArtifact).filter_by(task_id="task_worker").all()
         evidence = session.query(EvidenceUnit).filter_by(task_id="task_worker").all()
+        judgment_cards = (
+            session.query(JudgmentCard).filter_by(task_id="task_worker").all()
+        )
 
         assert task.status == TaskStatus.COMPLETED.value
         assert {step.status for step in steps} == {StepStatus.SUCCEEDED.value}
@@ -133,6 +137,20 @@ def test_analyze_document_job_completes_task_and_writes_report(tmp_path, monkeyp
         assert report.status == "ready"
         assert report.payload["parse_summary"]["page_count"] == 2
         assert score.total_score > 0
+        dimensions = score.score_payload["dimensions"]
+        assert len(dimensions) == 8
+        assert len(judgment_cards) == 8
+        assert score.total_score == sum(dimension["score"] for dimension in dimensions)
+        assert report.payload["score_result"]["dimensions"] == dimensions
+        for dimension in dimensions:
+            assert dimension["key"]
+            assert dimension["name"]
+            assert dimension["score"] >= 0
+            assert dimension["max_score"] > 0
+            assert dimension["reason"]
+            assert dimension["suggestions_for_bp"]
+            assert dimension["due_diligence_questions"]
+            assert "evidence_refs" in dimension
     finally:
         session.close()
 
