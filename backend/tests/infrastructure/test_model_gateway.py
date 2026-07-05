@@ -103,6 +103,52 @@ def test_openai_compatible_client_rejects_invalid_response_schema():
         client.complete_json(messages=[{"role": "user", "content": "hi"}])
 
 
+def test_openai_compatible_client_retries_transient_rate_limit():
+    calls = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request)
+        if len(calls) == 1:
+            return httpx.Response(429, json={"error": "rate limited"})
+        return httpx.Response(
+            200,
+            json={"choices": [{"message": {"content": "{\"ok\": true}"}}]},
+        )
+
+    client = OpenAICompatibleClient(
+        base_url="https://models.example.com/v1",
+        api_key="key",
+        model="MiniMax-M3",
+        http_client=httpx.Client(transport=httpx.MockTransport(handler)),
+        retry_attempts=2,
+        retry_backoff_seconds=0,
+    )
+
+    assert client.complete_json(messages=[{"role": "user", "content": "hi"}]) == {"ok": True}
+    assert len(calls) == 2
+
+
+def test_openai_compatible_client_raises_after_rate_limit_retries():
+    calls = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request)
+        return httpx.Response(429, json={"error": "rate limited"})
+
+    client = OpenAICompatibleClient(
+        base_url="https://models.example.com/v1",
+        api_key="key",
+        model="MiniMax-M3",
+        http_client=httpx.Client(transport=httpx.MockTransport(handler)),
+        retry_attempts=1,
+        retry_backoff_seconds=0,
+    )
+
+    with pytest.raises(httpx.HTTPStatusError, match="429"):
+        client.complete_json(messages=[{"role": "user", "content": "hi"}])
+    assert len(calls) == 2
+
+
 def test_openai_compatible_client_sends_image_as_data_url_and_parses_json():
     image_bytes = b"fake-image"
 

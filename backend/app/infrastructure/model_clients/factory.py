@@ -19,4 +19,6 @@ def build_model_gateway_from_env():
         api_key=api_key,
         model=os.getenv("LLM_MODEL", "MiniMax-M3"),
         timeout_seconds=int(os.getenv("LLM_TIMEOUT_SECONDS", "60")),
+        retry_attempts=int(os.getenv("LLM_RETRY_ATTEMPTS", "2")),
+        retry_backoff_seconds=float(os.getenv("LLM_RETRY_BACKOFF_SECONDS", "1")),
     )
