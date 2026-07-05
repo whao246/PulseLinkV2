@@ -1,7 +1,7 @@
 import pytest
 
 from app.domain.scoring.dimensions import SCORING_DIMENSIONS
-from app.domain.scoring.rubric import baseline_score_allowed
+from app.domain.scoring.rubric import SCORING_RUBRICS, baseline_score_allowed
 
 
 def test_scoring_dimensions_sum_to_100():
@@ -45,3 +45,19 @@ def test_unknown_dimension_key_raises_clear_error():
 
 def test_all_dimensions_have_required_category():
     assert all(d.required_category for d in SCORING_DIMENSIONS)
+
+
+def test_rubrics_capture_required_scoring_rules():
+    assert set(SCORING_RUBRICS) == {dimension.key for dimension in SCORING_DIMENSIONS}
+    assert "没有问题和痛点的描述，该项不及格" in SCORING_RUBRICS[
+        "problem_need_strength"
+    ].deduction_logic
+    assert "没有市场规模数据，该项不及格" in SCORING_RUBRICS[
+        "market_attractiveness"
+    ].deduction_logic
+    assert "项目方要在BP中补充的资料" in SCORING_RUBRICS[
+        "commercialization_progress"
+    ].suggestion_policy
+    assert "建议投资方尽调的方向和内容" in SCORING_RUBRICS[
+        "commercialization_progress"
+    ].suggestion_policy

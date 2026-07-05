@@ -10,6 +10,11 @@ from sqlalchemy.orm import sessionmaker
 
 from app.domain.analysis.pipeline import PIPELINE_STEP_NAMES
 from app.domain.scoring.dimensions import SCORING_DIMENSIONS
+from app.domain.scoring.rubric import (
+    REPORT_ORDER_RULE,
+    SCORING_RUBRICS,
+    SUGGESTION_SPLIT_RULE,
+)
 from app.domain.tasks.state_machine import StepStatus, TaskStatus, can_retry_step
 from app.infrastructure.db.models import (
     AnalysisTask,
@@ -301,8 +306,16 @@ class DatabaseAnalysisOrchestrator:
             model_gateway=self.model_gateway,
         )
         total_score = round(sum(dimension["score"] for dimension in dimensions), 2)
+        material_completeness = _build_material_completeness(result=result)
+        project_potential = {
+            "total_score": total_score,
+            "max_score": 100,
+            "dimensions": dimensions,
+        }
         score.total_score = total_score
         score.score_payload = {
+            "material_completeness": material_completeness,
+            "project_potential": project_potential,
             "potential_score": total_score,
             "score_source": score_source,
             "dimensions": dimensions,
@@ -329,6 +342,8 @@ class DatabaseAnalysisOrchestrator:
             },
             "parse_summary": _parse_summary_payload(result),
             "score_result": {
+                "material_completeness": score_payload.get("material_completeness"),
+                "project_potential": score_payload.get("project_potential"),
                 "potential_score": score_payload.get("potential_score"),
                 "score_source": score_payload.get("score_source"),
                 "dimensions": score_payload.get("dimensions", []),
@@ -410,7 +425,7 @@ def _build_dimension_scores(
             table_count=result.parse_summary.table_count,
             page_count=result.parse_summary.page_count,
         )
-        guidance = _DIMENSION_GUIDANCE[dimension.key]
+        rubric = SCORING_RUBRICS[dimension.key]
         dimensions.append(
             {
                 "key": dimension.key,
@@ -424,8 +439,8 @@ def _build_dimension_scores(
                     evidence_count=len(related_evidence),
                 ),
                 "evidence_refs": evidence_refs,
-                "suggestions_for_bp": guidance["suggestions_for_bp"],
-                "due_diligence_questions": guidance["due_diligence_questions"],
+                "suggestions_for_bp": list(rubric.suggestions_for_bp),
+                "due_diligence_questions": list(rubric.due_diligence_questions),
             }
         )
     return dimensions, "local_fallback"
@@ -438,6 +453,11 @@ def _build_scoring_messages(*, result, evidence_units: list[EvidenceUnit]) -> li
             "name": dimension.name,
             "max_score": dimension.max_score,
             "required_category": dimension.required_category,
+            "rubric": {
+                "scoring_rules": list(SCORING_RUBRICS[dimension.key].scoring_rules),
+                "deduction_logic": SCORING_RUBRICS[dimension.key].deduction_logic,
+                "suggestion_policy": SCORING_RUBRICS[dimension.key].suggestion_policy,
+            },
         }
         for dimension in SCORING_DIMENSIONS
     ]
@@ -454,7 +474,16 @@ def _build_scoring_messages(*, result, evidence_units: list[EvidenceUnit]) -> li
     ]
     payload = {
         "task": "请基于 BP 证据按 8 个维度评分，必须返回 JSON object。",
+        "report_order_rule": REPORT_ORDER_RULE,
+        "suggestion_split_rule": SUGGESTION_SPLIT_RULE,
         "output_schema": {
+            "material_completeness": {
+                "summary": "先说明材料完整度，再进入项目潜力。",
+                "missing_sections": ["缺失材料项"],
+            },
+            "project_potential": {
+                "dimensions": "与 dimensions 相同，用于报告组织。",
+            },
             "dimensions": [
                 {
                     "key": "评分维度 key",
@@ -619,6 +648,20 @@ def _write_judgment_cards(db_session, *, task_id: str, dimensions: list[dict]) -
         db_session.add(card)
 
 
+def _build_material_completeness(*, result) -> dict:
+    summary = _parse_summary_payload(result)
+    missing_sections = []
+    if summary["page_count"] <= 0:
+        missing_sections.append("PDF 页数")
+    if summary["evidence_unit_count"] < len(SCORING_DIMENSIONS):
+        missing_sections.append("八个评分维度的完整证据")
+    return {
+        "summary": "材料完整度先于项目潜力呈现；当前已完成 PDF 页数、文本/版面、表格线索和候选证据检查。",
+        "parse_summary": summary,
+        "missing_sections": missing_sections,
+    }
+
+
 def _verdict_for_score(*, score: float, max_score: float) -> str:
     ratio = score / max_score if max_score else 0
     if ratio >= 0.8:
@@ -628,87 +671,3 @@ def _verdict_for_score(*, score: float, max_score: float) -> str:
     if ratio > 0:
         return "weak"
     return "missing"
-
-
-_DIMENSION_GUIDANCE = {
-    "problem_need_strength": {
-        "suggestions_for_bp": [
-            "补充客户访谈、政策文件、行业报告等客观证据，证明痛点真实存在。",
-            "说明痛点的紧迫程度、影响范围和现有替代方案不足。",
-        ],
-        "due_diligence_questions": [
-            "访谈目标客户，确认痛点是否高频且有预算解决。",
-            "核验 BP 中引用的政策、调研和客户反馈来源。",
-        ],
-    },
-    "market_attractiveness": {
-        "suggestions_for_bp": [
-            "补充细分市场规模、增速、渗透率和国产化率等强相关数据。",
-            "优先引用头部咨询机构、协会或招股书等权威来源。",
-        ],
-        "due_diligence_questions": [
-            "复核市场规模口径是否与项目真实业务边界一致。",
-            "比较目标客户订单和行业增速是否匹配。",
-        ],
-    },
-    "product_solution": {
-        "suggestions_for_bp": [
-            "清晰说明产品如何回应前述痛点，以及核心竞争力来自哪里。",
-            "补充产品成熟度、稳定供应能力和竞品对比。",
-        ],
-        "due_diligence_questions": [
-            "验证产品 demo、交付记录和关键技术指标。",
-            "访谈客户确认产品优势是否真实可感知。",
-        ],
-    },
-    "business_model_unit_economics": {
-        "suggestions_for_bp": [
-            "说明客户类型、收费模式、销售周期和回款方式。",
-            "补充毛利率、获客成本、客单价和复购等单位经济指标。",
-        ],
-        "due_diligence_questions": [
-            "抽查合同和发票，确认收入确认方式。",
-            "测算规模化后毛利和现金流是否可持续。",
-        ],
-    },
-    "team_fit": {
-        "suggestions_for_bp": [
-            "补充核心团队研发、市场、产业资源和过往业绩。",
-            "突出创始人或核心团队与当前赛道的匹配度。",
-        ],
-        "due_diligence_questions": [
-            "核验核心成员履历、股权稳定性和分工。",
-            "评估团队短板是否需要通过招聘或顾问补足。",
-        ],
-    },
-    "commercialization_progress": {
-        "suggestions_for_bp": [
-            "补充产品研发、客户验证、订单、产能和认证进展。",
-            "提供过往三年财务数据和未来三年收入利润预测。",
-        ],
-        "due_diligence_questions": [
-            "核验客户订单、验收单、回款和在手 pipeline。",
-            "确认产能建设、认证节点和规模交付风险。",
-        ],
-    },
-    "competition_barriers": {
-        "suggestions_for_bp": [
-            "列出国内外竞对和对标上市公司，说明差异化定位。",
-            "突出资质、数据、渠道、工艺、先发优势等核心壁垒。",
-        ],
-        "due_diligence_questions": [
-            "访谈行业专家，判断壁垒是否可持续。",
-            "比较竞品价格、性能、渠道和客户重叠度。",
-        ],
-    },
-    "financing_logic_use_of_funds": {
-        "suggestions_for_bp": [
-            "明确融资金额、估值逻辑、资金用途和阶段目标。",
-            "说明后续融资、上市或并购退出路径。",
-        ],
-        "due_diligence_questions": [
-            "核验资金用途是否匹配当前阶段和未来里程碑。",
-            "评估估值、融资节奏和退出预期是否合理。",
-        ],
-    },
-}

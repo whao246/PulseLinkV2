@@ -250,11 +250,26 @@ def test_analyze_document_job_uses_model_gateway_for_scoring(tmp_path):
 
         assert len(fake_model.calls) == 1
         assert fake_model.calls[0]["temperature"] == 0
-        assert "问题与需求强度" in fake_model.calls[0]["messages"][1]["content"]
+        prompt = fake_model.calls[0]["messages"][1]["content"]
+        assert "问题与需求强度" in prompt
+        assert "没有问题和痛点的描述，该项不及格" in prompt
+        assert "没有市场规模数据，该项不及格" in prompt
+        assert "材料完整度放在项目潜力之前呈现" in prompt
+        assert "建议项目方要在BP中补充的资料" in prompt
+        assert "建议投资方尽调的方向和内容" in prompt
         assert score.total_score == 100
         assert score.score_payload["score_source"] == "llm"
+        assert list(score.score_payload)[:2] == [
+            "material_completeness",
+            "project_potential",
+        ]
         assert score.score_payload["dimensions"][0]["reason"].startswith("LLM reason")
+        assert score.score_payload["project_potential"]["dimensions"] == score.score_payload["dimensions"]
         assert report.payload["score_result"]["score_source"] == "llm"
+        assert list(report.payload["score_result"])[:2] == [
+            "material_completeness",
+            "project_potential",
+        ]
         assert report.payload["score_result"]["dimensions"] == score.score_payload["dimensions"]
         assert len(cards) == 8
         assert {card.verdict for card in cards} == {"strong"}
