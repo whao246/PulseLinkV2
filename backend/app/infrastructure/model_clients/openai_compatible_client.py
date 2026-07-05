@@ -122,12 +122,93 @@ def _parse_chat_json_response(response: httpx.Response) -> dict[str, Any]:
     if not isinstance(content, str):
         raise ValueError("invalid model response schema")
 
-    try:
-        parsed = json.loads(content)
-    except json.JSONDecodeError as exc:
-        raise ValueError("invalid model JSON") from exc
+    return _parse_model_json_content(content)
 
-    if not isinstance(parsed, dict):
-        raise ValueError("invalid model JSON: expected object")
 
-    return parsed
+def _parse_model_json_content(content: str) -> dict[str, Any]:
+    stripped = content.strip()
+    candidates = [stripped]
+
+    fenced = _strip_markdown_fence(stripped)
+    if fenced != stripped:
+        candidates.append(fenced)
+
+    embedded_object = _extract_first_json_object(stripped)
+    if embedded_object is not None:
+        candidates.append(embedded_object)
+
+    last_error: json.JSONDecodeError | None = None
+    for candidate in candidates:
+        if not candidate:
+            continue
+        try:
+            parsed = json.loads(candidate)
+        except json.JSONDecodeError as exc:
+            last_error = exc
+            continue
+        if not isinstance(parsed, dict):
+            raise ValueError("invalid model JSON: expected object")
+        return parsed
+
+    message = f"invalid model JSON: {_preview_content(stripped)}"
+    if last_error is not None:
+        raise ValueError(message) from last_error
+    raise ValueError(message)
+
+
+def _strip_markdown_fence(content: str) -> str:
+    if not content.startswith("```"):
+        return content
+
+    lines = content.splitlines()
+    if len(lines) < 2:
+        return content
+
+    first_line = lines[0].strip().lower()
+    if first_line not in {"```", "```json"}:
+        return content
+
+    if lines[-1].strip() == "```":
+        lines = lines[1:-1]
+    else:
+        lines = lines[1:]
+
+    return "\n".join(lines).strip()
+
+
+def _extract_first_json_object(content: str) -> str | None:
+    start = content.find("{")
+    if start == -1:
+        return None
+
+    depth = 0
+    in_string = False
+    escaped = False
+    for index in range(start, len(content)):
+        char = content[index]
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+            continue
+
+        if char == '"':
+            in_string = True
+        elif char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                return content[start : index + 1]
+
+    return None
+
+
+def _preview_content(content: str, limit: int = 120) -> str:
+    preview = " ".join(content.split())
+    if len(preview) > limit:
+        return f"{preview[:limit]}..."
+    return preview

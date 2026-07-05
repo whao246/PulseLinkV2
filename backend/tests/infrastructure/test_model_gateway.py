@@ -52,6 +52,62 @@ def test_openai_compatible_client_parses_json_response():
     assert client.complete_json(messages=[{"role": "user", "content": "hi"}]) == {"ok": True}
 
 
+def test_openai_compatible_client_parses_json_from_markdown_fence():
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {"message": {"content": "```json\n{\"ok\": true, \"score\": 8}\n```"}}
+                ]
+            },
+        )
+
+    client = OpenAICompatibleClient(
+        base_url="https://models.example.com/v1",
+        api_key="key",
+        model="MiniMax-M3",
+        http_client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+
+    assert client.complete_json(messages=[{"role": "user", "content": "hi"}]) == {
+        "ok": True,
+        "score": 8,
+    }
+
+
+def test_openai_compatible_client_extracts_json_object_from_text():
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {
+                        "message": {
+                            "content": (
+                                "Here is the structured result:\n"
+                                "{\"ok\": true, \"nested\": {\"value\": 1}}\n"
+                                "Please review."
+                            )
+                        }
+                    }
+                ]
+            },
+        )
+
+    client = OpenAICompatibleClient(
+        base_url="https://models.example.com/v1",
+        api_key="key",
+        model="MiniMax-M3",
+        http_client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+
+    assert client.complete_json(messages=[{"role": "user", "content": "hi"}]) == {
+        "ok": True,
+        "nested": {"value": 1},
+    }
+
+
 def test_openai_compatible_client_rejects_invalid_json():
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(
