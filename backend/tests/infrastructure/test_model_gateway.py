@@ -5,6 +5,8 @@ import httpx
 import pytest
 
 from app.infrastructure.model_clients.local_fallback_client import LocalFallbackClient
+from app.infrastructure.model_clients.factory import build_model_gateway_from_env
+from app.infrastructure.model_clients.minimax_client import MiniMaxClient
 from app.infrastructure.model_clients.openai_compatible_client import OpenAICompatibleClient
 
 
@@ -130,3 +132,33 @@ def test_openai_compatible_client_sends_image_as_data_url_and_parses_json():
     assert client.understand_image_json(prompt="extract table", image_bytes=image_bytes) == {
         "tables": 2
     }
+
+
+def test_model_gateway_factory_uses_local_fallback_without_key(monkeypatch):
+    monkeypatch.delenv("APP_ENV", raising=False)
+    monkeypatch.delenv("LLM_API_KEY", raising=False)
+
+    client = build_model_gateway_from_env()
+
+    assert isinstance(client, LocalFallbackClient)
+
+
+def test_model_gateway_factory_builds_minimax_client(monkeypatch):
+    monkeypatch.setenv("APP_ENV", "local")
+    monkeypatch.setenv("LLM_API_BASE", "https://api.minimax.chat/v1")
+    monkeypatch.setenv("LLM_API_KEY", "key")
+    monkeypatch.setenv("LLM_MODEL", "MiniMax-M3")
+
+    client = build_model_gateway_from_env()
+
+    assert isinstance(client, MiniMaxClient)
+    assert client.base_url == "https://api.minimax.chat/v1"
+    assert client.model == "MiniMax-M3"
+
+
+def test_model_gateway_factory_requires_key_in_production(monkeypatch):
+    monkeypatch.setenv("APP_ENV", "prod")
+    monkeypatch.delenv("LLM_API_KEY", raising=False)
+
+    with pytest.raises(RuntimeError, match="LLM_API_KEY is required"):
+        build_model_gateway_from_env()

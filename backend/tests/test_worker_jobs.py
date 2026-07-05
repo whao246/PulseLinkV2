@@ -5,6 +5,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from app.domain.analysis.pipeline import PIPELINE_STEP_NAMES
+from app.domain.scoring.dimensions import SCORING_DIMENSIONS
 from app.domain.tasks.state_machine import StepStatus, TaskStatus
 from app.infrastructure.db.base import Base
 from app.infrastructure.db.models import (
@@ -20,7 +21,7 @@ from app.infrastructure.db.models import (
     User,
 )
 from app.infrastructure.queue.publisher import ANALYZE_DOCUMENT_JOB_PATH
-from app.workers.jobs.analyze_document import run
+from app.workers.jobs.analyze_document import DatabaseAnalysisOrchestrator, run
 
 
 def test_analyze_document_job_invokes_orchestrator(monkeypatch):
@@ -154,6 +155,111 @@ def test_analyze_document_job_completes_task_and_writes_report(tmp_path, monkeyp
     finally:
         session.close()
 
+
+def test_analyze_document_job_uses_model_gateway_for_scoring(tmp_path):
+    database_url = f"sqlite:///{tmp_path / 'worker-llm.db'}"
+    engine = create_engine(database_url)
+    Base.metadata.create_all(engine)
+    SessionLocal = sessionmaker(bind=engine)
+    pdf_path = tmp_path / "sample.pdf"
+    pdf_path.write_bytes(b"%PDF-1.4\n/Type /Page\n%%EOF")
+
+    session = SessionLocal()
+    try:
+        session.add(
+            User(
+                id="usr_worker",
+                email="usr_worker@example.com",
+                display_name="Worker User",
+                is_active=True,
+            )
+        )
+        session.add(
+            File(
+                id="file_worker",
+                user_id="usr_worker",
+                sha256="sha_worker",
+                filename="sample.pdf",
+                content_type="application/pdf",
+                storage_uri=f"local://{pdf_path}",
+            )
+        )
+        session.add(
+            AnalysisTask(
+                id="task_worker_llm",
+                user_id="usr_worker",
+                file_id="file_worker",
+                idempotency_key="idem_worker_llm",
+                task_type="bp_analysis",
+                model_profile="MiniMax-M3",
+                status=TaskStatus.QUEUED.value,
+            )
+        )
+        for step_name in PIPELINE_STEP_NAMES:
+            session.add(
+                TaskStep(
+                    id=f"llm_step_{step_name}",
+                    task_id="task_worker_llm",
+                    step_name=step_name,
+                    status=StepStatus.PENDING.value,
+                    attempt_count=0,
+                    max_attempts=3,
+                )
+            )
+        session.commit()
+    finally:
+        session.close()
+
+    class FakeModelGateway:
+        def __init__(self):
+            self.calls = []
+
+        def complete_json(self, *, messages, temperature=0):
+            self.calls.append({"messages": messages, "temperature": temperature})
+            return {
+                "dimensions": [
+                    {
+                        "key": dimension.key,
+                        "score": dimension.max_score,
+                        "reason": f"LLM reason for {dimension.key}",
+                        "evidence_refs": [f"offline:{dimension.key}"],
+                        "suggestions_for_bp": [f"补充 {dimension.name}"],
+                        "due_diligence_questions": [f"核验 {dimension.name}"],
+                    }
+                    for dimension in SCORING_DIMENSIONS
+                ]
+            }
+
+        def understand_image_json(self, *, prompt, image_bytes):
+            return {"fallback": True}
+
+    fake_model = FakeModelGateway()
+    orchestrator = DatabaseAnalysisOrchestrator(
+        session_factory=sessionmaker(bind=engine, expire_on_commit=False),
+        artifact_dir=tmp_path / "artifacts",
+        model_gateway=fake_model,
+    )
+
+    orchestrator.run(task_id="task_worker_llm")
+
+    session = SessionLocal()
+    try:
+        score = session.query(ScoreResult).filter_by(task_id="task_worker_llm").one()
+        report = session.query(Report).filter_by(task_id="task_worker_llm").one()
+        cards = session.query(JudgmentCard).filter_by(task_id="task_worker_llm").all()
+
+        assert len(fake_model.calls) == 1
+        assert fake_model.calls[0]["temperature"] == 0
+        assert "问题与需求强度" in fake_model.calls[0]["messages"][1]["content"]
+        assert score.total_score == 100
+        assert score.score_payload["score_source"] == "llm"
+        assert score.score_payload["dimensions"][0]["reason"].startswith("LLM reason")
+        assert report.payload["score_result"]["score_source"] == "llm"
+        assert report.payload["score_result"]["dimensions"] == score.score_payload["dimensions"]
+        assert len(cards) == 8
+        assert {card.verdict for card in cards} == {"strong"}
+    finally:
+        session.close()
 
 def test_analyze_document_job_marks_retrying_when_step_can_retry(tmp_path, monkeypatch):
     database_url = f"sqlite:///{tmp_path / 'worker-failed.db'}"

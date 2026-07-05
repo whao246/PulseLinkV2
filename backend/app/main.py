@@ -20,6 +20,7 @@ def create_app(
 ) -> FastAPI:
     app = FastAPI(title="PulseLinkV2 API")
     resolved_database_url = database_url or os.getenv("DATABASE_URL")
+    _validate_runtime_config(database_url=resolved_database_url)
     app.state.database_url = resolved_database_url
     app.state.run_analysis_inline = run_analysis_inline
     if resolved_database_url:
@@ -63,6 +64,39 @@ def _build_queue_publisher(*, database_url: str | None):
     except ImportError:
         return None
     return QueuePublisher(queue=Queue(queue_name, connection=Redis.from_url(redis_url)))
+
+
+def _validate_runtime_config(*, database_url: str | None) -> None:
+    if os.getenv("APP_ENV", "local") != "prod":
+        return
+
+    if not database_url:
+        raise RuntimeError("DATABASE_URL is required when APP_ENV=prod")
+    if database_url.startswith("sqlite"):
+        raise RuntimeError("SQLite DATABASE_URL is not allowed when APP_ENV=prod")
+
+    jwt_secret = os.getenv("JWT_SECRET", "")
+    if jwt_secret == "change-me" or len(jwt_secret) < 32:
+        raise RuntimeError("JWT_SECRET must be a strong value when APP_ENV=prod")
+
+    required_env = [
+        "REDIS_URL",
+        "WECHAT_APP_ID",
+        "WECHAT_APP_SECRET",
+        "COS_BUCKET",
+        "COS_ENDPOINT",
+        "COS_SECRET_ID",
+        "COS_SECRET_KEY",
+        "LLM_API_BASE",
+        "LLM_API_KEY",
+        "LLM_MODEL",
+    ]
+    missing = [name for name in required_env if not os.getenv(name)]
+    if missing:
+        raise RuntimeError(
+            "missing required production environment variables: "
+            + ", ".join(missing)
+        )
 
 
 app = create_app()
