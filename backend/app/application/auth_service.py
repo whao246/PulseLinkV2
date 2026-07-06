@@ -12,3 +12,8 @@ class AuthService:
         user = self.files.ensure_user(user_id)
         self.db_session.commit()
         return user
+
+    def ensure_wechat_user(self, *, openid: str):
+        user = self.files.ensure_user(f"wechat:{openid}")
+        self.db_session.commit()
+        return user

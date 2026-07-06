@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import os
 import json
+import logging
+import time
 from pathlib import Path
 from uuid import uuid4
 
@@ -31,6 +33,8 @@ from app.infrastructure.model_clients.factory import build_model_gateway_from_en
 from app.infrastructure.pdf_tools.reader import extract_page_texts
 from app.pipeline.offline import analyze_pdf_offline
 
+logger = logging.getLogger(__name__)
+
 
 def build_orchestrator():
     database_url = os.getenv("DATABASE_URL")
@@ -46,8 +50,23 @@ def build_orchestrator():
 
 
 def run(*, task_id: str) -> None:
-    orchestrator = build_orchestrator()
-    orchestrator.run(task_id=task_id)
+    started_at = time.monotonic()
+    logger.info("analysis job start task_id=%s", task_id)
+    try:
+        orchestrator = build_orchestrator()
+        orchestrator.run(task_id=task_id)
+    except Exception:
+        logger.exception(
+            "analysis job failed task_id=%s elapsed=%.2fs",
+            task_id,
+            time.monotonic() - started_at,
+        )
+        raise
+    logger.info(
+        "analysis job succeeded task_id=%s elapsed=%.2fs",
+        task_id,
+        time.monotonic() - started_at,
+    )
 
 
 class DatabaseAnalysisOrchestrator:
@@ -121,9 +140,23 @@ class DatabaseAnalysisOrchestrator:
         db_session.add(step)
         db_session.commit()
 
+        step_started_at = time.monotonic()
+        logger.info(
+            "analysis step start task_id=%s step=%s attempt=%s",
+            task_id,
+            step_name,
+            step.attempt_count,
+        )
         try:
             payload = getattr(self, f"_step_{step_name}")(db_session, context)
         except Exception as exc:
+            logger.exception(
+                "analysis step failed task_id=%s step=%s attempt=%s elapsed=%.2fs",
+                task_id,
+                step_name,
+                step.attempt_count,
+                time.monotonic() - step_started_at,
+            )
             db_session.rollback()
             step = (
                 db_session.query(TaskStep)
@@ -165,6 +198,13 @@ class DatabaseAnalysisOrchestrator:
         }
         db_session.add(step)
         db_session.commit()
+        logger.info(
+            "analysis step succeeded task_id=%s step=%s attempt=%s elapsed=%.2fs",
+            task_id,
+            step_name,
+            step.attempt_count,
+            time.monotonic() - step_started_at,
+        )
 
     def _step_load_document(self, db_session, context: dict) -> dict:
         task = context["task"]
@@ -426,6 +466,23 @@ def _build_dimension_scores(
             page_count=result.parse_summary.page_count,
         )
         rubric = SCORING_RUBRICS[dimension.key]
+        evidence_quotes = _build_evidence_quotes(related_evidence)
+        positive_factors = _build_positive_factors(
+            dimension_name=dimension.name,
+            score=score,
+            max_score=dimension.max_score,
+            evidence_count=len(related_evidence),
+            evidence_refs=evidence_refs,
+            table_count=result.parse_summary.table_count,
+        )
+        deductions = _build_deductions(
+            dimension_name=dimension.name,
+            score=score,
+            max_score=dimension.max_score,
+            evidence_count=len(related_evidence),
+            table_count=result.parse_summary.table_count,
+            suggestions=list(rubric.suggestions_for_bp),
+        )
         dimensions.append(
             {
                 "key": dimension.key,
@@ -436,9 +493,13 @@ def _build_dimension_scores(
                     dimension_name=dimension.name,
                     score=score,
                     max_score=dimension.max_score,
-                    evidence_count=len(related_evidence),
+                    positive_factors=positive_factors,
+                    deductions=deductions,
                 ),
                 "evidence_refs": evidence_refs,
+                "evidence_quotes": evidence_quotes,
+                "positive_factors": positive_factors,
+                "deductions": deductions,
                 "suggestions_for_bp": list(rubric.suggestions_for_bp),
                 "due_diligence_questions": list(rubric.due_diligence_questions),
             }
@@ -489,6 +550,15 @@ def _build_scoring_messages(*, result, evidence_units: list[EvidenceUnit]) -> li
                     "key": "评分维度 key",
                     "score": "0 到 max_score 之间的数字",
                     "reason": "评分原因，说明加分和扣分依据",
+                    "positive_factors": ["具体加分依据，不要写空泛模板"],
+                    "deductions": ["具体扣分原因，说明缺什么或证据弱在哪里"],
+                    "evidence_quotes": [
+                        {
+                            "source_ref": "对应 evidence.source_ref",
+                            "page_number": "页码",
+                            "quote": "BP 原文或结构化证据摘录",
+                        }
+                    ],
                     "evidence_refs": ["引用 evidence.source_ref"],
                     "suggestions_for_bp": ["建议项目方在 BP 中补充什么"],
                     "due_diligence_questions": ["建议投资方尽调什么"],
@@ -535,6 +605,18 @@ def _normalize_model_dimensions(
                 f"invalid LLM scoring response: invalid score for {dimension.key}"
             ) from exc
         score = round(max(0.0, min(score, dimension.max_score)), 2)
+        evidence_refs = _normalize_model_evidence_refs(
+            raw.get("evidence_refs", []),
+            evidence_units=evidence_units,
+        )
+        positive_factors = _normalize_text_list(
+            raw.get("positive_factors"),
+            fallback=f"模型认为「{dimension.name}」已有可支持评分的正向材料。",
+        )
+        deductions = _normalize_text_list(
+            raw.get("deductions"),
+            fallback=f"模型未给出明确扣分项，需人工复核「{dimension.name}」缺口。",
+        )
         reason = raw.get("reason")
         if not isinstance(reason, str) or not reason.strip():
             raise ValueError(
@@ -547,9 +629,13 @@ def _normalize_model_dimensions(
                 "score": score,
                 "max_score": dimension.max_score,
                 "reason": reason.strip(),
-                "evidence_refs": _normalize_model_evidence_refs(
-                    raw.get("evidence_refs", []),
+                "positive_factors": positive_factors,
+                "deductions": deductions,
+                "evidence_refs": evidence_refs,
+                "evidence_quotes": _normalize_model_evidence_quotes(
+                    raw.get("evidence_quotes"),
                     evidence_units=evidence_units,
+                    fallback_refs=evidence_refs,
                 ),
                 "suggestions_for_bp": _normalize_text_list(
                     raw.get("suggestions_for_bp"),
@@ -562,6 +648,24 @@ def _normalize_model_dimensions(
             }
         )
     return normalized
+
+
+def _build_evidence_quotes(evidence_units: list[EvidenceUnit]) -> list[dict]:
+    quotes = []
+    for evidence in evidence_units[:3]:
+        quote = evidence.quote or evidence.normalized_text or evidence.content
+        if not quote:
+            continue
+        quotes.append(
+            {
+                "id": evidence.id,
+                "source_ref": evidence.source_ref,
+                "page_number": evidence.page_number,
+                "quote": quote,
+                "confidence_score": evidence.confidence_score,
+            }
+        )
+    return quotes
 
 
 def _normalize_model_evidence_refs(raw_refs, *, evidence_units: list[EvidenceUnit]):
@@ -582,6 +686,53 @@ def _normalize_model_evidence_refs(raw_refs, *, evidence_units: list[EvidenceUni
             }
         )
     return normalized
+
+
+def _normalize_model_evidence_quotes(
+    raw_quotes,
+    *,
+    evidence_units: list[EvidenceUnit],
+    fallback_refs: list[dict],
+) -> list[dict]:
+    evidence_by_ref = {evidence.source_ref: evidence for evidence in evidence_units}
+    quotes = []
+    items = raw_quotes if isinstance(raw_quotes, list) else []
+    for item in items[:3]:
+        if not isinstance(item, dict):
+            continue
+        source_ref = str(item.get("source_ref") or "")
+        evidence = evidence_by_ref.get(source_ref)
+        quote = item.get("quote")
+        if not isinstance(quote, str) or not quote.strip():
+            quote = (
+                evidence.quote
+                or evidence.normalized_text
+                or evidence.content
+                if evidence is not None
+                else None
+            )
+        if not isinstance(quote, str) or not quote.strip():
+            continue
+        quotes.append(
+            {
+                "source_ref": source_ref or (evidence.source_ref if evidence else None),
+                "page_number": item.get(
+                    "page_number", evidence.page_number if evidence else None
+                ),
+                "quote": quote.strip(),
+            }
+        )
+    if quotes:
+        return quotes
+
+    fallback_by_ref = {
+        ref.get("source_ref"): evidence_by_ref.get(ref.get("source_ref"))
+        for ref in fallback_refs
+        if isinstance(ref, dict)
+    }
+    return _build_evidence_quotes(
+        [evidence for evidence in fallback_by_ref.values() if evidence is not None]
+    )
 
 
 def _normalize_text_list(value, *, fallback: str) -> list[str]:
@@ -611,13 +762,68 @@ def _dimension_reason(
     dimension_name: str,
     score: float,
     max_score: float,
-    evidence_count: int,
+    positive_factors: list[str],
+    deductions: list[str],
 ) -> str:
+    positive_summary = "；".join(positive_factors[:2])
+    deduction_summary = "；".join(deductions[:2])
+    return (
+        f"该项得分 {score}/{max_score}。"
+        f"加分依据：{positive_summary}。"
+        f"扣分原因：{deduction_summary}。"
+    )
+
+
+def _build_positive_factors(
+    *,
+    dimension_name: str,
+    score: float,
+    max_score: float,
+    evidence_count: int,
+    evidence_refs: list[dict],
+    table_count: int,
+) -> list[str]:
     if evidence_count <= 0:
-        return f"未检索到与「{dimension_name}」直接相关的结构化证据，因此该项暂不计分。"
-    if score >= max_score * 0.8:
-        return f"已检索到与「{dimension_name}」相关的候选证据，材料完整度较好，按当前离线规则给出较高分。"
-    return f"已检索到与「{dimension_name}」相关的候选证据，但证据强度和结构化程度仍需人工复核。"
+        return [f"未检索到与「{dimension_name}」直接相关的结构化证据。"]
+
+    pages = sorted(
+        {
+            ref.get("page_number")
+            for ref in evidence_refs
+            if isinstance(ref.get("page_number"), int)
+        }
+    )
+    page_summary = f"，主要位于第 {', '.join(str(page) for page in pages)} 页" if pages else ""
+    factors = [
+        f"检索到 {evidence_count} 条与「{dimension_name}」相关的候选证据{page_summary}。",
+        f"当前得分达到该项满分的 {round(score / max_score * 100, 1) if max_score else 0}%。",
+    ]
+    if table_count > 0:
+        factors.append(f"全文解析出 {table_count} 个表格，可辅助核验经营、市场或财务数据。")
+    return factors
+
+
+def _build_deductions(
+    *,
+    dimension_name: str,
+    score: float,
+    max_score: float,
+    evidence_count: int,
+    table_count: int,
+    suggestions: list[str],
+) -> list[str]:
+    deductions = []
+    if evidence_count <= 0:
+        deductions.append(f"缺少可直接支撑「{dimension_name}」评分的证据。")
+    elif evidence_count < 2:
+        deductions.append(f"「{dimension_name}」相关证据数量偏少，需要更多交叉验证材料。")
+    if table_count <= 0:
+        deductions.append("未解析到表格数据，市场、财务或单位经济测算的结构化支撑不足。")
+    if score < max_score:
+        deduction = suggestions[0] if suggestions else f"仍需补充「{dimension_name}」相关材料。"
+        deductions.append(deduction)
+    return deductions or [f"该项接近满分，但仍建议人工复核「{dimension_name}」证据真实性。"]
+
 
 
 def _write_judgment_cards(db_session, *, task_id: str, dimensions: list[dict]) -> None:
@@ -629,7 +835,7 @@ def _write_judgment_cards(db_session, *, task_id: str, dimensions: list[dict]) -
         )
         if card is None:
             card = JudgmentCard(
-                id=f"judgment_{task_id}_{dimension['key']}",
+                id=f"judgment_{uuid4().hex}",
                 task_id=task_id,
                 dimension_key=dimension["key"],
             )
@@ -642,6 +848,9 @@ def _write_judgment_cards(db_session, *, task_id: str, dimensions: list[dict]) -
         card.payload = {
             "score": dimension["score"],
             "max_score": dimension["max_score"],
+            "positive_factors": dimension.get("positive_factors", []),
+            "deductions": dimension.get("deductions", []),
+            "evidence_quotes": dimension.get("evidence_quotes", []),
             "suggestions_for_bp": dimension["suggestions_for_bp"],
             "due_diligence_questions": dimension["due_diligence_questions"],
         }

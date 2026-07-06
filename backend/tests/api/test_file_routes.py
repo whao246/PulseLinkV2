@@ -11,7 +11,7 @@ def test_register_file_persists_to_database():
     response = client.post(
         "/api/files",
         headers={
-            "Authorization": "Bearer test-token",
+            "Authorization": "Bearer test-token-usr_file",
             "Idempotency-Key": "file-route-1",
         },
         json={
@@ -29,7 +29,7 @@ def test_register_file_persists_to_database():
     try:
         stored = db_session.query(File).filter_by(id=file_id).one()
         assert stored.filename == "sample.pdf"
-        assert stored.user_id == "local-test-user"
+        assert stored.user_id == "usr_file"
         assert stored.storage_uri == "local://sample.pdf"
     finally:
         db_session.close()
@@ -47,12 +47,18 @@ def test_register_file_returns_existing_file_for_same_payload():
 
     first = client.post(
         "/api/files",
-        headers={"Idempotency-Key": "file-route-1"},
+        headers={
+            "Authorization": "Bearer test-token-usr_file",
+            "Idempotency-Key": "file-route-1",
+        },
         json=payload,
     )
     second = client.post(
         "/api/files",
-        headers={"Idempotency-Key": "file-route-2"},
+        headers={
+            "Authorization": "Bearer test-token-usr_file",
+            "Idempotency-Key": "file-route-2",
+        },
         json=payload,
     )
 
@@ -69,6 +75,7 @@ def test_create_pdf_upload_presign_returns_put_contract(monkeypatch):
 
     response = client.post(
         "/api/uploads/pdf/presign",
+        headers={"Authorization": "Bearer test-token-usr_upload"},
         json={
             "file_name": "sample.pdf",
             "file_size": 1024,
@@ -84,6 +91,7 @@ def test_create_pdf_upload_presign_returns_put_contract(monkeypatch):
     assert data["upload"]["headers"] == {"Content-Type": "application/pdf"}
     assert data["upload"]["expires_in"] == 900
     assert data["object"]["bucket"] == "pulselink-local"
+    assert data["object"]["key"].startswith("uploads/usr_upload/")
     assert data["object"]["key"].endswith(".pdf")
     assert data["object"]["content_type"] == "application/pdf"
     assert data["storage_uri"] == f"cos://pulselink-local/{data['object']['key']}"
@@ -95,6 +103,7 @@ def test_create_pdf_upload_presign_rejects_non_pdf():
 
     response = client.post(
         "/api/uploads/pdf/presign",
+        headers={"Authorization": "Bearer test-token-usr_upload"},
         json={
             "file_name": "sample.txt",
             "file_size": 1024,
@@ -104,3 +113,51 @@ def test_create_pdf_upload_presign_rejects_non_pdf():
     )
 
     assert response.status_code == 422
+
+
+def test_register_file_requires_authentication():
+    app = create_app(database_url="sqlite:///:memory:")
+    client = TestClient(app)
+
+    response = client.post(
+        "/api/files",
+        headers={"Idempotency-Key": "file-route-no-auth"},
+        json={
+            "filename": "sample.pdf",
+            "content_type": "application/pdf",
+            "size_bytes": 1024,
+            "storage_uri": "local://sample.pdf",
+        },
+    )
+
+    assert response.status_code == 401
+
+
+def test_create_pdf_upload_presign_returns_cos_authorization(monkeypatch):
+    monkeypatch.setenv("COS_ENDPOINT", "https://pulselink-prod.cos.ap-guangzhou.myqcloud.com")
+    monkeypatch.setenv("COS_BUCKET", "pulselink-prod")
+    monkeypatch.setenv("COS_SECRET_ID", "cos-secret-id")
+    monkeypatch.setenv("COS_SECRET_KEY", "cos-secret-key")
+    app = create_app(database_url="sqlite:///:memory:")
+    client = TestClient(app)
+
+    response = client.post(
+        "/api/uploads/pdf/presign",
+        headers={"Authorization": "Bearer test-token-usr_upload"},
+        json={
+            "file_name": "sample.pdf",
+            "file_size": 1024,
+            "sha256": "a" * 64,
+            "content_type": "application/pdf",
+        },
+    )
+
+    assert response.status_code == 200
+    data = response.json()["data"]
+    assert data["upload"]["url"].startswith(
+        "https://pulselink-prod.cos.ap-guangzhou.myqcloud.com/uploads/usr_upload/"
+    )
+    assert data["upload"]["headers"]["Authorization"].startswith(
+        "q-sign-algorithm=sha1&q-ak=cos-secret-id&"
+    )
+    assert data["upload"]["headers"]["Content-Type"] == "application/pdf"

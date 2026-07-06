@@ -81,3 +81,6 @@ class TaskService:
 
     def list_steps(self, task_id: str):
         return self.tasks.list_steps(task_id)
+
+    def get_task(self, task_id: str):
+        return self.tasks.get_by_id(task_id)

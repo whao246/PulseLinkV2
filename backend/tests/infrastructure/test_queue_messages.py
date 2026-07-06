@@ -58,3 +58,22 @@ def test_queue_publisher_enqueues_task_id():
 
     assert captured["func_path"] == ANALYZE_DOCUMENT_JOB_PATH
     assert captured["kwargs"]["task_id"] == "task_1"
+    assert captured["kwargs"]["job_timeout"] == 600
+
+
+def test_queue_publisher_uses_configured_job_timeout(monkeypatch):
+    captured = {}
+
+    class FakeQueue:
+        def enqueue(self, func_path, **kwargs):
+            captured["func_path"] = func_path
+            captured["kwargs"] = kwargs
+
+    monkeypatch.setenv("RQ_JOB_TIMEOUT_SECONDS", "1800")
+
+    publisher = QueuePublisher(queue=FakeQueue())
+    publisher.publish_analyze_document(task_id="task_1")
+
+    assert captured["func_path"] == ANALYZE_DOCUMENT_JOB_PATH
+    assert captured["kwargs"]["task_id"] == "task_1"
+    assert captured["kwargs"]["job_timeout"] == 1800

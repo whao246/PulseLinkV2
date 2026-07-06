@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, Depends, Request
 
+from app.api.dependencies.auth import get_current_user_id
 from app.application.report_service import ReportService
 from app.core.responses import ok
 
@@ -10,14 +11,17 @@ router = APIRouter(prefix="/api/reports", tags=["reports"])
 
 
 @router.get("")
-def list_reports(request: Request):
+def list_reports(
+    request: Request,
+    user_id: str = Depends(get_current_user_id),
+):
     session_factory = getattr(request.app.state, "db_session_factory", None)
     if session_factory is None:
         return ok({"items": []}, request)
 
     db_session = session_factory()
     try:
-        reports = ReportService(db_session=db_session).list_reports()
+        reports = ReportService(db_session=db_session).list_reports(user_id=user_id)
         items = [
             {
                 "id": report.id,

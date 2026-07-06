@@ -8,6 +8,7 @@ from sqlalchemy.pool import StaticPool
 from sqlalchemy.orm import sessionmaker
 
 from app.api.routes import auth, files, health, reports, tasks
+from app.core.logging import configure_logging
 from app.infrastructure.db.base import Base
 import app.infrastructure.db.models  # noqa: F401
 from app.infrastructure.queue.publisher import QueuePublisher
@@ -18,6 +19,7 @@ def create_app(
     database_url: str | None = None,
     run_analysis_inline: bool = False,
 ) -> FastAPI:
+    configure_logging()
     app = FastAPI(title="PulseLinkV2 API")
     resolved_database_url = database_url or os.getenv("DATABASE_URL")
     _validate_runtime_config(database_url=resolved_database_url)

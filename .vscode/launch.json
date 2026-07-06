@@ -5,7 +5,12 @@
       "name": "PulseLink API (local Python)",
       "type": "python",
       "request": "launch",
+      "python": "${workspaceFolder}/.venv/bin/python",
+      "pythonPath": "${workspaceFolder}/.venv/bin/python",
+      "pythonArgs": ["-Xfrozen_modules=off"],
       "module": "uvicorn",
+      "console": "integratedTerminal",
+      "envFile": "${workspaceFolder}/.env",
       "args": [
         "app.main:app",
         "--host",
@@ -21,6 +26,7 @@
         "DATABASE_URL": "mysql+pymysql://pulselink:pulselink@127.0.0.1:3307/pulselink",
         "REDIS_URL": "redis://127.0.0.1:6379/0",
         "QUEUE_NAME": "pulselink",
+        "RQ_JOB_TIMEOUT_SECONDS": "1800",
         "RUN_ANALYSIS_INLINE": "false",
         "LOCAL_FILE_ROOT": "${workspaceFolder}",
         "COS_ENDPOINT": "http://localhost:9000",
@@ -32,7 +38,12 @@
       "name": "PulseLink Worker Job (local Python)",
       "type": "python",
       "request": "launch",
+      "python": "${workspaceFolder}/.venv/bin/python",
+      "pythonPath": "${workspaceFolder}/.venv/bin/python",
+      "pythonArgs": ["-Xfrozen_modules=off"],
       "module": "app.workers.main",
+      "console": "integratedTerminal",
+      "envFile": "${workspaceFolder}/.env",
       "cwd": "${workspaceFolder}/backend",
       "env": {
         "PYTHONPATH": "${workspaceFolder}/backend",
@@ -40,6 +51,8 @@
         "DATABASE_URL": "mysql+pymysql://pulselink:pulselink@127.0.0.1:3307/pulselink",
         "REDIS_URL": "redis://127.0.0.1:6379/0",
         "QUEUE_NAME": "pulselink",
+        "RQ_WORKER_CLASS": "simple",
+        "RQ_JOB_TIMEOUT_SECONDS": "1800",
         "RUN_ANALYSIS_INLINE": "false",
         "LOCAL_FILE_ROOT": "${workspaceFolder}",
         "COS_ENDPOINT": "http://localhost:9000",
@@ -62,6 +75,15 @@
         }
       ],
       "justMyCode": false
+    }
+  ],
+  "compounds": [
+    {
+      "name": "PulseLink API + Worker (local Python)",
+      "configurations": [
+        "PulseLink API (local Python)",
+        "PulseLink Worker Job (local Python)"
+      ]
     }
   ]
 }

@@ -4,14 +4,15 @@ import os
 import re
 from typing import Annotated
 from datetime import datetime, timezone
-from urllib.parse import quote
 from uuid import uuid4
 
-from fastapi import APIRouter, Header, HTTPException, Request
+from fastapi import APIRouter, Depends, Header, HTTPException, Request
 
+from app.api.dependencies.auth import get_current_user_id
 from app.api.schemas.files import FileRegistrationRequest, UploadPresignRequest
 from app.application.file_service import FileService
 from app.core.responses import ok
+from app.infrastructure.storage.cos_presign import create_cos_put_presign
 
 
 uploads_router = APIRouter(prefix="/api/uploads", tags=["uploads"])
@@ -19,29 +20,36 @@ router = APIRouter(prefix="/api/files", tags=["files"])
 
 
 @uploads_router.post("/pdf/presign")
-def create_pdf_upload_presign(payload: UploadPresignRequest, request: Request):
+def create_pdf_upload_presign(
+    payload: UploadPresignRequest,
+    request: Request,
+    user_id: str = Depends(get_current_user_id),
+):
     _validate_pdf_upload(payload)
     bucket = os.getenv("COS_BUCKET", "pulselink-local")
     endpoint = os.getenv("COS_ENDPOINT", "http://minio:9000")
     expires_in = int(os.getenv("UPLOAD_PRESIGN_EXPIRES_SECONDS", "900"))
-    user_id = "local-test-user"
     today = datetime.now(timezone.utc)
     safe_name = _safe_filename(payload.file_name)
     object_key = (
         f"uploads/{user_id}/{today:%Y/%m}/file_{uuid4().hex}_{safe_name}"
     )
-    upload_url = _build_object_url(
+    presign = create_cos_put_presign(
         endpoint=endpoint,
         bucket=bucket,
         object_key=object_key,
+        content_type=payload.content_type,
+        expires_in=expires_in,
+        secret_id=os.getenv("COS_SECRET_ID"),
+        secret_key=os.getenv("COS_SECRET_KEY"),
     )
 
     return ok(
         {
             "upload": {
                 "method": "PUT",
-                "url": upload_url,
-                "headers": {"Content-Type": payload.content_type},
+                "url": presign.url,
+                "headers": presign.headers,
                 "expires_in": expires_in,
             },
             "object": {
@@ -58,8 +66,12 @@ def create_pdf_upload_presign(payload: UploadPresignRequest, request: Request):
 
 
 @uploads_router.post("/presign")
-def create_upload_presign(payload: UploadPresignRequest, request: Request):
-    return create_pdf_upload_presign(payload, request)
+def create_upload_presign(
+    payload: UploadPresignRequest,
+    request: Request,
+    user_id: str = Depends(get_current_user_id),
+):
+    return create_pdf_upload_presign(payload, request, user_id)
 
 
 @router.post("")
@@ -67,6 +79,7 @@ def register_file(
     payload: FileRegistrationRequest,
     request: Request,
     idempotency_key: Annotated[str | None, Header(alias="Idempotency-Key")] = None,
+    user_id: str = Depends(get_current_user_id),
 ):
     session_factory = getattr(request.app.state, "db_session_factory", None)
     if session_factory is None:
@@ -75,7 +88,7 @@ def register_file(
     db_session = session_factory()
     try:
         file = FileService(db_session=db_session).register_file(
-            user_id="local-test-user",
+            user_id=user_id,
             filename=payload.filename,
             content_type=payload.content_type,
             size_bytes=payload.size_bytes,
@@ -119,12 +132,3 @@ def _safe_filename(file_name: str) -> str:
     basename = file_name.rsplit("/", 1)[-1].rsplit("\\", 1)[-1]
     cleaned = re.sub(r"[^A-Za-z0-9._-]+", "_", basename).strip("._")
     return cleaned or "upload.pdf"
-
-
-def _build_object_url(*, endpoint: str, bucket: str, object_key: str) -> str:
-    endpoint = endpoint.rstrip("/")
-    quoted_key = "/".join(quote(part) for part in object_key.split("/"))
-    host_contains_bucket = f"//{bucket}." in endpoint or endpoint.endswith(f"/{bucket}")
-    if host_contains_bucket:
-        return f"{endpoint}/{quoted_key}"
-    return f"{endpoint}/{bucket}/{quoted_key}"

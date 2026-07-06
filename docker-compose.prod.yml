@@ -1,0 +1,95 @@
+services:
+  api:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers ${API_WORKERS:-2}
+    environment:
+      APP_ENV: prod
+      DATABASE_URL: ${DATABASE_URL}
+      REDIS_URL: ${REDIS_URL}
+      QUEUE_NAME: ${QUEUE_NAME:-pulselink}
+      RQ_JOB_TIMEOUT_SECONDS: ${RQ_JOB_TIMEOUT_SECONDS:-1800}
+      RUN_ANALYSIS_INLINE: "false"
+      ARTIFACT_DIR: ${ARTIFACT_DIR:-/tmp/pulselink-artifacts}
+      LOCAL_FILE_ROOT: ${LOCAL_FILE_ROOT:-/app}
+      PDF_MAX_PAGES: ${PDF_MAX_PAGES:-120}
+      PDF_MAX_SIZE_MB: ${PDF_MAX_SIZE_MB:-50}
+      STEP_TIMEOUT_SECONDS: ${STEP_TIMEOUT_SECONDS:-300}
+      MAX_RETRY_ATTEMPTS: ${MAX_RETRY_ATTEMPTS:-3}
+      ENABLE_VISION: ${ENABLE_VISION:-true}
+      JWT_SECRET: ${JWT_SECRET}
+      WECHAT_APP_ID: ${WECHAT_APP_ID}
+      WECHAT_APP_SECRET: ${WECHAT_APP_SECRET}
+      COS_REGION: ${COS_REGION:-ap-guangzhou}
+      COS_ENDPOINT: ${COS_ENDPOINT}
+      COS_BUCKET: ${COS_BUCKET}
+      COS_SECRET_ID: ${COS_SECRET_ID}
+      COS_SECRET_KEY: ${COS_SECRET_KEY}
+      UPLOAD_PRESIGN_EXPIRES_SECONDS: ${UPLOAD_PRESIGN_EXPIRES_SECONDS:-900}
+      LLM_API_BASE: ${LLM_API_BASE}
+      LLM_API_KEY: ${LLM_API_KEY}
+      LLM_MODEL: ${LLM_MODEL:-MiniMax-M3}
+      LLM_TIMEOUT_SECONDS: ${LLM_TIMEOUT_SECONDS:-360}
+      LLM_RETRY_ATTEMPTS: ${LLM_RETRY_ATTEMPTS:-2}
+      LLM_RETRY_BACKOFF_SECONDS: ${LLM_RETRY_BACKOFF_SECONDS:-1}
+      LLM_RESPONSE_LOG_MAX_CHARS: ${LLM_RESPONSE_LOG_MAX_CHARS:-2000}
+      LLM_REASONING_SPLIT: ${LLM_REASONING_SPLIT:-true}
+      VISION_API_BASE: ${VISION_API_BASE:-https://api.minimax.chat/v1}
+      VISION_API_KEY: ${VISION_API_KEY}
+      VISION_MODEL: ${VISION_MODEL:-MiniMax-M3}
+    ports:
+      - "${API_PORT:-8000}:8000"
+    restart: unless-stopped
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import httpx; r=httpx.get('http://127.0.0.1:8000/api/health', timeout=5); raise SystemExit(0 if r.status_code == 200 else 1)",
+        ]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  worker:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    command: python -m app.workers.main
+    environment:
+      APP_ENV: prod
+      DATABASE_URL: ${DATABASE_URL}
+      REDIS_URL: ${REDIS_URL}
+      QUEUE_NAME: ${QUEUE_NAME:-pulselink}
+      RQ_JOB_TIMEOUT_SECONDS: ${RQ_JOB_TIMEOUT_SECONDS:-1800}
+      RUN_ANALYSIS_INLINE: "false"
+      ARTIFACT_DIR: ${ARTIFACT_DIR:-/tmp/pulselink-artifacts}
+      LOCAL_FILE_ROOT: ${LOCAL_FILE_ROOT:-/app}
+      PDF_MAX_PAGES: ${PDF_MAX_PAGES:-120}
+      PDF_MAX_SIZE_MB: ${PDF_MAX_SIZE_MB:-50}
+      STEP_TIMEOUT_SECONDS: ${STEP_TIMEOUT_SECONDS:-300}
+      MAX_RETRY_ATTEMPTS: ${MAX_RETRY_ATTEMPTS:-3}
+      ENABLE_VISION: ${ENABLE_VISION:-true}
+      JWT_SECRET: ${JWT_SECRET}
+      WECHAT_APP_ID: ${WECHAT_APP_ID}
+      WECHAT_APP_SECRET: ${WECHAT_APP_SECRET}
+      COS_REGION: ${COS_REGION:-ap-guangzhou}
+      COS_ENDPOINT: ${COS_ENDPOINT}
+      COS_BUCKET: ${COS_BUCKET}
+      COS_SECRET_ID: ${COS_SECRET_ID}
+      COS_SECRET_KEY: ${COS_SECRET_KEY}
+      LLM_API_BASE: ${LLM_API_BASE}
+      LLM_API_KEY: ${LLM_API_KEY}
+      LLM_MODEL: ${LLM_MODEL:-MiniMax-M3}
+      LLM_TIMEOUT_SECONDS: ${LLM_TIMEOUT_SECONDS:-360}
+      LLM_RETRY_ATTEMPTS: ${LLM_RETRY_ATTEMPTS:-2}
+      LLM_RETRY_BACKOFF_SECONDS: ${LLM_RETRY_BACKOFF_SECONDS:-1}
+      LLM_RESPONSE_LOG_MAX_CHARS: ${LLM_RESPONSE_LOG_MAX_CHARS:-2000}
+      LLM_REASONING_SPLIT: ${LLM_REASONING_SPLIT:-true}
+      VISION_API_BASE: ${VISION_API_BASE:-https://api.minimax.chat/v1}
+      VISION_API_KEY: ${VISION_API_KEY}
+      VISION_MODEL: ${VISION_MODEL:-MiniMax-M3}
+    restart: unless-stopped

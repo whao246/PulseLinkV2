@@ -33,6 +33,13 @@ class TaskRepository:
             .one_or_none()
         )
 
+    def get_by_id(self, task_id: str):
+        return (
+            self.db_session.query(AnalysisTask)
+            .filter(AnalysisTask.id == task_id)
+            .one_or_none()
+        )
+
     def create_task(
         self,
         *,

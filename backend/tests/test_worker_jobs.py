@@ -1,4 +1,5 @@
 import importlib
+import logging
 from pathlib import Path
 
 from sqlalchemy import create_engine
@@ -21,7 +22,11 @@ from app.infrastructure.db.models import (
     User,
 )
 from app.infrastructure.queue.publisher import ANALYZE_DOCUMENT_JOB_PATH
-from app.workers.jobs.analyze_document import DatabaseAnalysisOrchestrator, run
+from app.workers.jobs.analyze_document import (
+    DatabaseAnalysisOrchestrator,
+    _write_judgment_cards,
+    run,
+)
 
 
 def test_analyze_document_job_invokes_orchestrator(monkeypatch):
@@ -49,7 +54,9 @@ def test_analyze_document_queue_path_is_importable():
     assert target is run
 
 
-def test_analyze_document_job_completes_task_and_writes_report(tmp_path, monkeypatch):
+def test_analyze_document_job_completes_task_and_writes_report(
+    tmp_path, monkeypatch, caplog
+):
     database_url = f"sqlite:///{tmp_path / 'worker.db'}"
     engine = create_engine(database_url)
     Base.metadata.create_all(engine)
@@ -105,6 +112,7 @@ def test_analyze_document_job_completes_task_and_writes_report(tmp_path, monkeyp
 
     monkeypatch.setenv("DATABASE_URL", database_url)
     monkeypatch.setenv("ARTIFACT_DIR", str(tmp_path / "artifacts"))
+    caplog.set_level(logging.INFO, logger="app.workers.jobs.analyze_document")
 
     run(task_id="task_worker")
 
@@ -149,9 +157,20 @@ def test_analyze_document_job_completes_task_and_writes_report(tmp_path, monkeyp
             assert dimension["score"] >= 0
             assert dimension["max_score"] > 0
             assert dimension["reason"]
+            assert "按当前离线规则" not in dimension["reason"]
+            assert dimension["positive_factors"]
+            assert dimension["deductions"]
+            assert "evidence_quotes" in dimension
             assert dimension["suggestions_for_bp"]
             assert dimension["due_diligence_questions"]
             assert "evidence_refs" in dimension
+        assert "analysis job start task_id=task_worker" in caplog.text
+        assert "analysis step start task_id=task_worker step=load_document" in caplog.text
+        assert (
+            "analysis step succeeded task_id=task_worker step=assemble_report"
+            in caplog.text
+        )
+        assert "analysis job succeeded task_id=task_worker" in caplog.text
     finally:
         session.close()
 
@@ -222,6 +241,15 @@ def test_analyze_document_job_uses_model_gateway_for_scoring(tmp_path):
                         "key": dimension.key,
                         "score": dimension.max_score,
                         "reason": f"LLM reason for {dimension.key}",
+                        "positive_factors": [f"LLM positive for {dimension.key}"],
+                        "deductions": [f"LLM deduction for {dimension.key}"],
+                        "evidence_quotes": [
+                            {
+                                "source_ref": f"offline:{dimension.key}",
+                                "page_number": 1,
+                                "quote": f"quote for {dimension.key}",
+                            }
+                        ],
                         "evidence_refs": [f"offline:{dimension.key}"],
                         "suggestions_for_bp": [f"补充 {dimension.name}"],
                         "due_diligence_questions": [f"核验 {dimension.name}"],
@@ -257,6 +285,9 @@ def test_analyze_document_job_uses_model_gateway_for_scoring(tmp_path):
         assert "材料完整度放在项目潜力之前呈现" in prompt
         assert "建议项目方要在BP中补充的资料" in prompt
         assert "建议投资方尽调的方向和内容" in prompt
+        assert "positive_factors" in prompt
+        assert "deductions" in prompt
+        assert "evidence_quotes" in prompt
         assert score.total_score == 100
         assert score.score_payload["score_source"] == "llm"
         assert list(score.score_payload)[:2] == [
@@ -264,6 +295,15 @@ def test_analyze_document_job_uses_model_gateway_for_scoring(tmp_path):
             "project_potential",
         ]
         assert score.score_payload["dimensions"][0]["reason"].startswith("LLM reason")
+        assert score.score_payload["dimensions"][0]["positive_factors"][0].startswith(
+            "LLM positive"
+        )
+        assert score.score_payload["dimensions"][0]["deductions"][0].startswith(
+            "LLM deduction"
+        )
+        assert score.score_payload["dimensions"][0]["evidence_quotes"][0]["quote"].startswith(
+            "quote for"
+        )
         assert score.score_payload["project_potential"]["dimensions"] == score.score_payload["dimensions"]
         assert report.payload["score_result"]["score_source"] == "llm"
         assert list(report.payload["score_result"])[:2] == [
@@ -275,6 +315,42 @@ def test_analyze_document_job_uses_model_gateway_for_scoring(tmp_path):
         assert {card.verdict for card in cards} == {"strong"}
     finally:
         session.close()
+
+
+def test_judgment_card_ids_fit_database_column(tmp_path):
+    database_url = f"sqlite:///{tmp_path / 'judgment-id.db'}"
+    engine = create_engine(database_url)
+    Base.metadata.create_all(engine)
+    SessionLocal = sessionmaker(bind=engine)
+    task_id = "7f225506c92b44c3b345a6c4b7e7943b"
+
+    session = SessionLocal()
+    try:
+        _write_judgment_cards(
+            session,
+            task_id=task_id,
+            dimensions=[
+                {
+                    "key": "business_model_unit_economics",
+                    "score": 10,
+                    "max_score": 12.5,
+                    "reason": "reason",
+                    "evidence_refs": [],
+                    "positive_factors": [],
+                    "deductions": [],
+                    "evidence_quotes": [],
+                    "suggestions_for_bp": ["suggestion"],
+                    "due_diligence_questions": ["question"],
+                }
+            ],
+        )
+        session.commit()
+
+        card = session.query(JudgmentCard).filter_by(task_id=task_id).one()
+        assert len(card.id) <= 64
+    finally:
+        session.close()
+
 
 def test_analyze_document_job_marks_retrying_when_step_can_retry(tmp_path, monkeypatch):
     database_url = f"sqlite:///{tmp_path / 'worker-failed.db'}"

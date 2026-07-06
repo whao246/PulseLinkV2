@@ -1,5 +1,6 @@
 import json
 import base64
+import logging
 
 import httpx
 import pytest
@@ -50,6 +51,150 @@ def test_openai_compatible_client_parses_json_response():
     )
 
     assert client.complete_json(messages=[{"role": "user", "content": "hi"}]) == {"ok": True}
+
+
+def test_openai_compatible_client_can_send_reasoning_split():
+    def handler(request: httpx.Request) -> httpx.Response:
+        json_payload = json.loads(request.read())
+        assert json_payload["reasoning_split"] is True
+        assert "thinking" not in json_payload
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {
+                        "message": {
+                            "reasoning_details": [{"text": "private reasoning"}],
+                            "content": "{\"ok\": true}",
+                        }
+                    }
+                ]
+            },
+        )
+
+    client = OpenAICompatibleClient(
+        base_url="https://models.example.com/v1",
+        api_key="key",
+        model="MiniMax-M3",
+        http_client=httpx.Client(transport=httpx.MockTransport(handler)),
+        reasoning_split=True,
+    )
+
+    assert client.complete_json(messages=[{"role": "user", "content": "hi"}]) == {"ok": True}
+
+
+def test_openai_compatible_client_logs_request_without_secrets(caplog):
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={"choices": [{"message": {"content": "{\"ok\": true}"}}]},
+        )
+
+    caplog.set_level(
+        logging.INFO,
+        logger="app.infrastructure.model_clients.openai_compatible_client",
+    )
+    client = OpenAICompatibleClient(
+        base_url="https://models.example.com/v1",
+        api_key="secret-key",
+        model="MiniMax-M3",
+        http_client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+
+    assert client.complete_json(messages=[{"role": "user", "content": "hi"}]) == {"ok": True}
+    assert "llm request start" in caplog.text
+    assert "llm response received" in caplog.text
+    assert "MiniMax-M3" in caplog.text
+    assert "secret-key" not in caplog.text
+    assert "Bearer" not in caplog.text
+
+
+def test_openai_compatible_client_logs_response_preview(caplog, monkeypatch):
+    monkeypatch.setenv("LLM_RESPONSE_LOG_MAX_CHARS", "80")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {"message": {"content": "{\"marker\":\"response-body-marker\"}"}}
+                ]
+            },
+        )
+
+    caplog.set_level(
+        logging.INFO,
+        logger="app.infrastructure.model_clients.openai_compatible_client",
+    )
+    client = OpenAICompatibleClient(
+        base_url="https://models.example.com/v1",
+        api_key="secret-key",
+        model="MiniMax-M3",
+        http_client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+
+    assert client.complete_json(messages=[{"role": "user", "content": "hi"}]) == {
+        "marker": "response-body-marker"
+    }
+    assert "llm response body" in caplog.text
+    assert "response-body-marker" in caplog.text
+    assert "secret-key" not in caplog.text
+
+
+def test_openai_compatible_client_can_disable_response_body_logging(
+    caplog, monkeypatch
+):
+    monkeypatch.setenv("LLM_RESPONSE_LOG_MAX_CHARS", "0")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {"message": {"content": "{\"marker\":\"response-body-marker\"}"}}
+                ]
+            },
+        )
+
+    caplog.set_level(
+        logging.INFO,
+        logger="app.infrastructure.model_clients.openai_compatible_client",
+    )
+    client = OpenAICompatibleClient(
+        base_url="https://models.example.com/v1",
+        api_key="secret-key",
+        model="MiniMax-M3",
+        http_client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+
+    assert client.complete_json(messages=[{"role": "user", "content": "hi"}]) == {
+        "marker": "response-body-marker"
+    }
+    assert "llm response body" not in caplog.text
+    assert "response-body-marker" not in caplog.text
+
+
+def test_openai_compatible_client_logs_timeout_without_secrets(caplog):
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ReadTimeout("read timeout", request=request)
+
+    caplog.set_level(
+        logging.INFO,
+        logger="app.infrastructure.model_clients.openai_compatible_client",
+    )
+    client = OpenAICompatibleClient(
+        base_url="https://models.example.com/v1",
+        api_key="secret-key",
+        model="MiniMax-M3",
+        http_client=httpx.Client(transport=httpx.MockTransport(handler)),
+        retry_attempts=0,
+    )
+
+    with pytest.raises(httpx.ReadTimeout):
+        client.complete_json(messages=[{"role": "user", "content": "hi"}])
+    assert "llm request timeout" in caplog.text
+    assert "secret-key" not in caplog.text
+    assert "Bearer" not in caplog.text
 
 
 def test_openai_compatible_client_parses_json_from_markdown_fence():
@@ -105,6 +250,37 @@ def test_openai_compatible_client_extracts_json_object_from_text():
     assert client.complete_json(messages=[{"role": "user", "content": "hi"}]) == {
         "ok": True,
         "nested": {"value": 1},
+    }
+
+
+def test_openai_compatible_client_ignores_think_block_before_json():
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {
+                        "message": {
+                            "content": (
+                                "<think>I may mention a malformed { brace here.</think>\n"
+                                "```json\n{\"ok\": true, \"score\": 8}\n```"
+                            )
+                        }
+                    }
+                ]
+            },
+        )
+
+    client = OpenAICompatibleClient(
+        base_url="https://models.example.com/v1",
+        api_key="key",
+        model="MiniMax-M3",
+        http_client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+
+    assert client.complete_json(messages=[{"role": "user", "content": "hi"}]) == {
+        "ok": True,
+        "score": 8,
     }
 
 
@@ -256,6 +432,20 @@ def test_model_gateway_factory_builds_minimax_client(monkeypatch):
     assert isinstance(client, MiniMaxClient)
     assert client.base_url == "https://api.minimax.chat/v1"
     assert client.model == "MiniMax-M3"
+    assert client.reasoning_split is True
+
+
+def test_model_gateway_factory_can_disable_reasoning_split(monkeypatch):
+    monkeypatch.setenv("APP_ENV", "local")
+    monkeypatch.setenv("LLM_API_BASE", "https://api.minimax.chat/v1")
+    monkeypatch.setenv("LLM_API_KEY", "key")
+    monkeypatch.setenv("LLM_MODEL", "MiniMax-M3")
+    monkeypatch.setenv("LLM_REASONING_SPLIT", "false")
+
+    client = build_model_gateway_from_env()
+
+    assert isinstance(client, MiniMaxClient)
+    assert client.reasoning_split is False
 
 
 def test_model_gateway_factory_requires_key_in_production(monkeypatch):
